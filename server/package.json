@@ -1,0 +1,37 @@
+{
+  "name": "@ere/server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "seed:demo": "tsx src/seedDemo.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.60.0",
+    "@ere/engine": "0.1.0",
+    "@napi-rs/canvas": "^1.0.11",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "better-sqlite3": "^12.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.0",
+    "nodemailer": "^7.0.0",
+    "pdfjs-dist": "^4.10.38",
+    "tesseract.js": "^7.0.0",
+    "tsx": "^4.19.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "^6.4.17",
+    "typescript": "^5.6.0"
+  }
+}

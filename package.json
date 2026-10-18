@@ -1,0 +1,13 @@
+{
+  "name": "exam-readiness-engine",
+  "private": true,
+  "type": "module",
+  "workspaces": ["server", "client", "packages/engine"],
+  "scripts": {
+    "dev": "npm run dev --workspace server & npm run dev --workspace client",
+    "build": "npm run build --workspace client",
+    "start": "npm start --workspace server",
+    "test": "npm test --workspace packages/engine",
+    "seed:demo": "npm run seed:demo --workspace server"
+  }
+}
