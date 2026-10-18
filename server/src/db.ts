@@ -171,6 +171,7 @@ function CREATE_EXTRA() {
   const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map(c => c.name);
   if (!cols('sources').includes('ocr_pages')) db.exec('ALTER TABLE sources ADD COLUMN ocr_pages INTEGER NOT NULL DEFAULT 0');
   if (!cols('sources').includes('year')) db.exec('ALTER TABLE sources ADD COLUMN year INTEGER');
+  if (!cols('sources').includes('note')) db.exec('ALTER TABLE sources ADD COLUMN note TEXT');
 }
 
 export default db;

@@ -67,65 +67,90 @@ export function Empty({ title, children }: { title: string; children?: ReactNode
   );
 }
 
-/** Formula: real LaTeX goes through KaTeX; plain chemistry like "6CO2 + 6H2O" gets subscripts. */
+/** Typeset LaTeX with KaTeX. Display maths scrolls sideways inside its own box on small screens. */
+export function Tex({ src, block = false }: { src: string; block?: boolean }) {
+  const html = katex.renderToString(src, { throwOnError: false, displayMode: block, strict: false, trust: false });
+  return block
+    ? <div className="tex-block overflow-x-auto overflow-y-hidden py-1" dangerouslySetInnerHTML={{ __html: html }} />
+    : <span className="katex-wrap" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+const MATH_UNICODE = /[∇∈∉≤≥≠≈∞→⇒∀∃∂×·∩∪⊂⊆ℓ⋆‖∑∏√λμσθαβγδεπρτφωΔΣΩ]/;
+
+/** A formula from a book: LaTeX, chemistry ("6CO2 + 6H2O") or a word equation ("glucose = lactic acid"). */
 export function Formula({ src, block = false }: { src: string; block?: boolean }) {
-  // Chemistry like "6CO2 + 6H2O" (element followed by a digit) gets subscripts; everything else is typeset as math.
-  const looksChem = /[A-Z][a-z]?\d/.test(src) && !/[\\^_{}]/.test(src);
   const hasTex = /[\\^_{}]/.test(src);
-  const wordy = /[a-z]{3,}/.test(src) && !hasTex; // "glucose = lactic acid" reads better as plain text
-  const looksLatex = !looksChem && !wordy && (hasTex || /^[\w\s=+\-*/().,']+$/.test(src));
-  if (looksLatex) {
+  const looksChem = !hasTex && /[A-Z][a-z]?\d/.test(src);
+  const wordy = !hasTex && /[a-z]{3,}/.test(src) && !MATH_UNICODE.test(src);
+  if (!looksChem && !wordy) {
     // Chemical formulas (C_6H_{12}O_6) look right upright, not in maths italics.
-    const tex = /[A-Z][a-z]?_\{?\d/.test(src) && !/\\frac|\\sqrt/.test(src) ? `\\mathrm{${src}}` : src;
-    const html = katex.renderToString(tex, { throwOnError: false, displayMode: block });
-    return <span className="katex-wrap" dangerouslySetInnerHTML={{ __html: html }} />;
+    const tex = /[A-Z][a-z]?_\{?\d/.test(src) && !/\\frac|\\sqrt|\\sum|\\nabla|\\lambda/.test(src) ? `\\mathrm{${src}}` : src;
+    return <Tex src={tex} block={block} />;
   }
   // Digits right after a letter or ")" become subscripts (no regex lookbehind: older iPhones can't parse it).
   const parts: { t: string; sub: boolean }[] = [];
   for (const m of src.matchAll(/([A-Za-z)])(\d+)|[^]/g)) {
-    if (m[2]) { parts.push({ t: m[1], sub: false }, { t: m[2], sub: true }); }
+    if (m[2] && looksChem) { parts.push({ t: m[1], sub: false }, { t: m[2], sub: true }); }
     else parts.push({ t: m[0], sub: false });
   }
-  return <span className="font-display">{parts.map((p, i) => (p.sub ? <sub key={i}>{p.t}</sub> : <span key={i}>{p.t}</span>))}</span>;
+  const el = <span className="font-display">{parts.map((p, i) => (p.sub ? <sub key={i}>{p.t}</sub> : <span key={i}>{p.t}</span>))}</span>;
+  return block ? <div className="text-lg py-1">{el}</div> : el;
 }
 
-/** Tiny markdown: bullets, bold, inline code, $math$, tables. Enough for generated notes. */
+/** Inline formatting: **bold**, `code`, and maths as $...$ or \(...\). */
+function inline(s: string, key: number) {
+  const out: ReactNode[] = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\\\((.+?)\\\)|\$(?!\$)((?:\\\$|[^$])+?)\$)/g;
+  let last = 0, m: RegExpExecArray | null, k = 0;
+  while ((m = re.exec(s))) {
+    if (m.index > last) out.push(s.slice(last, m.index));
+    const t = m[0];
+    if (t.startsWith('**')) out.push(<strong key={k++}>{inline(t.slice(2, -2), k)}</strong>);
+    else if (t.startsWith('`')) out.push(<Formula key={k++} src={t.slice(1, -1)} />);
+    else out.push(<Tex key={k++} src={(m[2] ?? m[3]).trim()} />);
+    last = m.index + t.length;
+  }
+  out.push(s.slice(last));
+  return <span key={key}>{out}</span>;
+}
+
+/** Notes renderer: headings, bullet and numbered lists, tables, paragraphs, inline maths and display maths
+ *  ($$...$$ or \[...\], which may span several lines). Written for what the AI step and the offline method produce. */
 export function Markdown({ text }: { text: string | null | undefined }) {
   if (!text) return null;
-  const inline = (s: string, key: number) => {
-    const out: ReactNode[] = [];
-    const re = /(\*\*[^*]+\*\*|`[^`]+`|\$[^$]+\$)/g;
-    let last = 0, m: RegExpExecArray | null, k = 0;
-    while ((m = re.exec(s))) {
-      if (m.index > last) out.push(s.slice(last, m.index));
-      const t = m[0];
-      if (t.startsWith('**')) out.push(<strong key={k++}>{t.slice(2, -2)}</strong>);
-      else if (t.startsWith('`')) out.push(<Formula key={k++} src={t.slice(1, -1)} />);
-      else out.push(<Formula key={k++} src={t.slice(1, -1)} />);
-      last = m.index + t.length;
-    }
-    out.push(s.slice(last));
-    return <span key={key}>{out}</span>;
-  };
+  // Pull display maths out first so line-based parsing doesn't split it.
+  const displays: string[] = [];
+  const src = text
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_, m) => `\n\u0000${displays.push(m.trim()) - 1}\u0000\n`)
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n\u0000${displays.push(m.trim()) - 1}\u0000\n`);
   const blocks: ReactNode[] = [];
-  const lines = text.split('\n');
+  const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (/^\s*[-*] /.test(l)) {
+    const disp = l.match(/^\s*\u0000(\d+)\u0000\s*$/);
+    if (disp) { blocks.push(<Tex key={i} src={displays[Number(disp[1])]} block />); continue; }
+    const h = l.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { blocks.push(<p key={i} className="font-display font-bold mt-3">{inline(h[2], i)}</p>); continue; }
+    if (/^\s*[-*•] /.test(l)) {
       const items: string[] = [];
-      while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*] /, ''));
+      while (i < lines.length && /^\s*[-*•] /.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*•] /, ''));
       i--;
       blocks.push(<ul key={i}>{items.map((it, k) => <li key={k}>{inline(it, k)}</li>)}</ul>);
+    } else if (/^\s*\d+[.)] /.test(l)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*\d+[.)] /.test(lines[i])) items.push(lines[i++].replace(/^\s*\d+[.)] /, ''));
+      i--;
+      blocks.push(<ol key={i}>{items.map((it, k) => <li key={k}>{inline(it, k)}</li>)}</ol>);
     } else if (/^\|/.test(l)) {
       const rows: string[][] = [];
       while (i < lines.length && /^\|/.test(lines[i])) {
-        if (!/^\|[\s:-]+\|/.test(lines[i]) || /[a-z]/i.test(lines[i])) rows.push(lines[i].split('|').slice(1, -1).map(c => c.trim()));
+        if (!/^\|[\s:|-]+\|?\s*$/.test(lines[i])) rows.push(lines[i].split('|').slice(1, -1).map(c => c.trim()));
         i++;
       }
       i--;
       const [head, ...body] = rows;
-      blocks.push(<table key={i}><thead><tr>{head.map((c, k) => <th key={k}>{inline(c, k)}</th>)}</tr></thead>
-        <tbody>{body.map((r, k) => <tr key={k}>{r.map((c, j) => <td key={j}>{inline(c, j)}</td>)}</tr>)}</tbody></table>);
+      if (head) blocks.push(<div key={i} className="overflow-x-auto"><table><thead><tr>{head.map((c, k) => <th key={k}>{inline(c, k)}</th>)}</tr></thead>
+        <tbody>{body.map((r, k) => <tr key={k}>{r.map((c, j) => <td key={j}>{inline(c, j)}</td>)}</tr>)}</tbody></table></div>);
     } else if (l.trim()) blocks.push(<p key={i}>{inline(l, i)}</p>);
   }
   return <div className="prose-note">{blocks}</div>;

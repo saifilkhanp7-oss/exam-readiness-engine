@@ -56,6 +56,12 @@
 }
 :root[data-theme="light"] { color-scheme: light; }
 
+/* A one-column grid must never grow wider than the screen because of a long word, file name or formula.
+   Explicit grid-cols-* utilities still win (utilities layer comes after base). */
+@layer base {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 html, body, #root { min-height: 100%; }
 body { transition: background-color .2s; background: var(--color-paper); color: var(--color-ink); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
 h1, h2, h3, .font-display { font-family: var(--font-display); letter-spacing: -0.01em; }
@@ -64,6 +70,13 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 
 .prose-note ul { list-style: disc; padding-left: 1.2rem; display: grid; gap: .35rem; }
+.prose-note ol { list-style: decimal; padding-left: 1.4rem; display: grid; gap: .35rem; }
+.prose-note, .prose-note p, .prose-note li { overflow-wrap: anywhere; }
+.prose-note .katex, .katex-wrap .katex { white-space: nowrap; overflow-wrap: normal; }
+.tex-block .katex-display { margin: .35rem 0; }
+@media (max-width: 640px) { .tex-block .katex-display { font-size: .9em; } }
+.katex { font-size: 1.06em; }
+.katex-wrap { display: inline-block; max-width: 100%; overflow-x: auto; overflow-y: hidden; vertical-align: bottom; }
 .prose-note p { margin: .4rem 0; }
 .prose-note strong { font-weight: 700; }
 .prose-note code { background: var(--color-mist); padding: 0 .3rem; border-radius: 4px; font-size: .92em; }

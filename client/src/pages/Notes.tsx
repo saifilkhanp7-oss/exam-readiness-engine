@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Printer, AlertTriangle, Shuffle, RotateCw, Moon } from 'lucide-react';
 import { api, type Subject } from '../api.ts';
@@ -113,49 +113,105 @@ function CheatSheet({ d }: { d: Data }) {
   );
 }
 
+/** Chapter names straight from a PDF can be blank or just "."; give those a plain name. */
+function chapterGroups(d: Data) {
+  const groups: { raw: string; name: string; topics: Note[] }[] = [];
+  for (const n of d.notes) {
+    const raw = (n.chapter ?? '').replace(/\s+/g, ' ').trim();
+    const name = /[A-Za-z]{2}|\d/.test(raw) ? raw : '';
+    const last = groups[groups.length - 1];
+    if (last && last.raw === raw) last.topics.push(n);
+    else groups.push({ raw, name, topics: [n] });
+  }
+  let k = 0;
+  return groups.map(g => ({ ...g, name: g.name || (groups.length === 1 ? d.subject.name : `Part ${++k}`) }));
+}
+
+type Band = 'clear' | 'haze' | 'storm' | 'new';
+const bandOf = (n: Note): Band => (!n.studied ? 'new' : n.recall_on_exam >= 0.8 ? 'clear' : n.recall_on_exam >= 0.6 ? 'haze' : 'storm');
+const BAND_COLOR: Record<Band, string> = { clear: 'var(--color-clear)', haze: 'var(--color-haze)', storm: 'var(--color-storm)', new: 'var(--color-mist-deep)' };
+const BAND_LABEL: Record<Band, string> = { clear: 'Will remember', haze: 'Fading', storm: 'Likely to forget', new: 'Not studied' };
+
+/** Topic map: subject → chapters → topics, as a compact tree. Tap a topic to see its key line and quiz it. */
 function MindMap({ d }: { d: Data }) {
-  const chapters = [...new Set(d.notes.map(n => n.chapter ?? d.subject.name))];
-  const W = 1120, H = 640, cx = W / 2, cy = H / 2;
-  const nodes = chapters.map((ch, i) => {
-    const a = (i / chapters.length) * Math.PI * 2 - Math.PI / 2;
-    const topics = d.notes.filter(n => (n.chapter ?? d.subject.name) === ch);
-    return { ch, a, x: cx + Math.cos(a) * 170, y: cy + Math.sin(a) * 140, topics };
-  });
-  const short = (s: string, n = 26) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+  const groups = chapterGroups(d);
+  const [show, setShow] = useState<'all' | 'risk' | 'new'>('all');
+  const [sel, setSel] = useState<number | null>(null);
+  const keep = (n: Note) => show === 'all' || (show === 'new' ? !n.studied : bandOf(n) === 'storm' || bandOf(n) === 'haze' || n.danger);
+  const nRisk = d.notes.filter(n => n.studied && (bandOf(n) !== 'clear' || n.danger)).length;
+  const nNew = d.notes.filter(n => !n.studied).length;
+
   return (
-    <Card className="p-3 overflow-x-auto">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[720px]" role="img" aria-label={`Mind map of ${d.subject.name}`}>
-        {nodes.map(n => n.topics.map((t, k) => {
-          const spread = Math.min(1.1, 0.42 * n.topics.length) / Math.max(1, n.topics.length - 1);
-          const a = n.a + (k - (n.topics.length - 1) / 2) * (n.topics.length > 1 ? spread : 0);
-          const x = cx + Math.cos(a) * 365, y = cy + Math.sin(a) * 255;
-          const left = Math.cos(a) < -0.2;
-          const color = t.studied ? recallColor(t.recall_on_exam) : 'var(--color-mist-deep)';
+    <Card className="p-4 md:p-6 min-w-0">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold break-words">{d.subject.name}</h2>
+          <p className="text-sm text-ink-soft">{d.notes.length} topics in {groups.length} {groups.length === 1 ? 'chapter' : 'chapters'}. Tap a topic to see its key point.</p>
+        </div>
+        <div className="flex gap-1 rounded-full bg-paper p-1 text-xs font-bold" role="group" aria-label="Which topics to show">
+          {([['all', `All ${d.notes.length}`], ['risk', `At risk ${nRisk}`], ['new', `Not studied ${nNew}`]] as const).map(([k, l]) => (
+            <button key={k} onClick={() => setShow(k)} aria-pressed={show === k}
+              className={`rounded-full px-3 py-1.5 ${show === k ? 'bg-card text-ink shadow-sm' : 'text-ink-soft hover:text-ink'}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <ol className="mt-5 relative border-l-2 border-mist-deep ml-1.5">
+        {groups.map((g, gi) => {
+          const topics = g.topics.filter(keep);
+          const mix = (['clear', 'haze', 'storm', 'new'] as Band[]).map(b => [b, g.topics.filter(t => bandOf(t) === b).length] as const);
           return (
-            <g key={t.id}>
-              <path d={`M${n.x},${n.y} Q${(n.x + x) / 2 + Math.cos(a) * 20},${(n.y + y) / 2} ${x},${y}`} stroke="var(--color-mist-deep)" strokeWidth="1.5" fill="none" />
-              <circle cx={x} cy={y} r="7" fill={color} />
-              <text x={x + (left ? -13 : 13)} y={y + 4.5} textAnchor={left ? 'end' : 'start'} fontSize="14" fill="var(--color-ink)" fontFamily="var(--font-sans)">{short(t.title)}</text>
-              <text x={x + (left ? -13 : 13)} y={y + 21} textAnchor={left ? 'end' : 'start'} fontSize="11.5" fill="var(--color-ink-soft)" fontFamily="var(--font-sans)">{t.studied ? `${pct(t.recall_on_exam)} on exam day` : 'not studied'}</text>
-            </g>
+            <li key={gi} className="relative pl-5 pb-5 last:pb-0">
+              <span className="absolute -left-[7px] top-1.5 w-3 h-3 rounded-full bg-card border-2 border-ink" />
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <h3 className="font-display font-bold text-[15px] leading-snug min-w-0 break-words">{g.name}</h3>
+                <span className="text-xs text-ink-soft tabular-nums">{g.topics.length} {g.topics.length === 1 ? 'topic' : 'topics'}</span>
+                <span className="flex h-1.5 w-20 rounded-full overflow-hidden bg-mist" title={mix.filter(([, c]) => c).map(([b, c]) => `${c} ${BAND_LABEL[b].toLowerCase()}`).join(', ')}>
+                  {mix.map(([b, c]) => c ? <span key={b} style={{ width: `${(c / g.topics.length) * 100}%`, background: BAND_COLOR[b] }} /> : null)}
+                </span>
+              </div>
+              {topics.length ? (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {topics.map(t => (<Fragment key={t.id}>
+                    <button onClick={() => setSel(s => (s === t.id ? null : t.id))} aria-expanded={sel === t.id} title={t.title}
+                      className={`max-w-full inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] leading-tight text-left transition-colors
+                        ${sel === t.id ? 'border-act bg-act-soft' : 'border-mist bg-paper hover:border-mist-deep'}`}>
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: BAND_COLOR[bandOf(t)] }} />
+                      <span className="truncate">{t.title}</span>
+                      {t.studied && <span className="text-ink-soft tabular-nums shrink-0">{pct(t.recall_on_exam)}</span>}
+                      {t.danger && <AlertTriangle size={11} className="text-storm shrink-0" aria-label="Risky" />}
+                    </button>
+                    {sel === t.id && <TopicPeek t={t} />}
+                  </Fragment>))}
+                </div>
+              ) : <p className="text-xs text-ink-soft mt-1.5">Nothing here for this filter.</p>}
+            </li>
           );
-        }))}
-        {nodes.map(n => (
-          <g key={n.ch}>
-            <line x1={cx} y1={cy} x2={n.x} y2={n.y} stroke="var(--color-mist-deep)" strokeWidth="2.5" />
-            <rect x={n.x - 78} y={n.y - 19} width="156" height="38" rx="19" fill="var(--color-card)" stroke="var(--color-ink)" strokeWidth="1.5" />
-            <text x={n.x} y={n.y + 5} textAnchor="middle" fontSize="14" fontWeight="700" fill="var(--color-ink)" fontFamily="var(--font-display)">{short(n.ch.replace(/^(chapter|unit)\s+\d+\s*/i, ''), 19)}</text>
-          </g>
+        })}
+      </ol>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-soft mt-5 pt-4 border-t border-mist">
+        {(Object.keys(BAND_LABEL) as Band[]).map(b => (
+          <span key={b} className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: BAND_COLOR[b] }} />{BAND_LABEL[b]}</span>
         ))}
-        <circle cx={cx} cy={cy} r="52" fill="var(--color-solid)" />
-        <text x={cx} y={cy + 6} textAnchor="middle" fontSize="18" fontWeight="800" fill="var(--color-on-solid)" fontFamily="var(--font-display)">{short(d.subject.name, 12)}</text>
-      </svg>
-      <div className="flex gap-5 justify-center text-xs text-ink-soft pb-2">
-        {[['var(--color-clear)', 'Will remember'], ['var(--color-haze)', 'Fading'], ['var(--color-storm)', 'Likely to forget'], ['var(--color-mist-deep)', 'Not studied']].map(([c, l]) => (
-          <span key={l} className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full" style={{ background: c }} />{l}</span>
-        ))}
+        <span className="sm:ml-auto">% = predicted recall on exam day</span>
       </div>
     </Card>
+  );
+}
+
+/** Opens right under the tapped topic (full row width), so it stays next to what you tapped. */
+function TopicPeek({ t: selected }: { t: Note }) {
+  return (
+                <div className="basis-full my-1 rounded-xl border border-mist bg-paper p-3.5 text-sm min-w-0">
+                  <p className="font-bold break-words">{selected.title}</p>
+                  <p className="text-xs text-ink-soft mt-0.5">
+                    {selected.studied ? `${pct(selected.recall_on_exam)} predicted on exam day, ${BAND_LABEL[bandOf(selected)].toLowerCase()}` : 'Not studied yet'}
+                    {selected.page_from ? `. Pages ${selected.page_from}–${selected.page_to}` : ''}
+                  </p>
+                  {selected.line && <div className="mt-2 leading-relaxed prose-note"><Markdown text={selected.line} /></div>}
+                  <Link to={`/quiz?topicId=${selected.id}`}><Button variant="soft" className="mt-3 py-1.5 text-sm">Quiz this topic</Button></Link>
+                </div>
   );
 }
 
@@ -192,13 +248,12 @@ function Flashcards({ d }: { d: Data }) {
 }
 
 function Chapters({ d }: { d: Data }) {
-  const chapters = [...new Set(d.notes.map(n => n.chapter ?? 'Notes'))];
   return (
     <div className="grid gap-6 max-w-3xl">
-      {chapters.map(ch => (
-        <Card key={ch} className="p-6 md:p-8">
-          <h2 className="text-2xl font-extrabold mb-4">{ch}</h2>
-          {d.notes.filter(n => (n.chapter ?? 'Notes') === ch).map(n => (
+      {chapterGroups(d).map((g, gi) => (
+        <Card key={gi} className="p-6 md:p-8">
+          <h2 className="text-2xl font-extrabold mb-4 break-words">{g.name}</h2>
+          {g.topics.map(n => (
             <div key={n.id} className="mb-5 last:mb-0">
               <h3 className="font-bold text-lg mb-1">{n.title}</h3>
               <p className="leading-[1.75] text-[15.5px]">{n.simple || n.line}</p>
@@ -212,20 +267,37 @@ function Chapters({ d }: { d: Data }) {
 
 function FormulaSheet({ d }: { d: Data }) {
   if (!d.formulas.length) return <Empty title="No formulas found">This subject's PDFs have no formulas yet.</Empty>;
+  // One card per topic, topics you are most likely to forget first; formulas inside in book order.
+  const groups = new Map<number, { topic: string; topicId: number; items: FormulaRow[]; risk: number; studied: boolean }>();
+  for (const f of d.formulas) {
+    const g = groups.get(f.topicId) ?? { topic: f.topic, topicId: f.topicId, items: [], risk: 1, studied: false };
+    g.items.push(f);
+    if (f.studied) { g.studied = true; g.risk = Math.min(g.risk, f.recall_on_exam); }
+    groups.set(f.topicId, g);
+  }
+  const list = [...groups.values()].sort((a, b) => (a.studied === b.studied ? a.risk - b.risk : a.studied ? -1 : 1));
+  const order = new Map(d.notes.map((n, i) => [n.id, i]));
   return (
-    <Card className="divide-y divide-mist">
-      <p className="px-5 py-3 text-sm text-ink-soft">Sorted by how likely you are to forget each one by the exam, most at risk first.</p>
-      {d.formulas.map((f, k) => (
-        <div key={f.id} className="grid sm:grid-cols-[28px_1fr_auto] gap-x-4 gap-y-1 items-center px-5 py-4">
-          <span className="font-display font-bold text-ink-soft">{k + 1}</span>
-          <div>
-            <div className="text-lg"><Formula src={f.latex} /></div>
-            <p className="text-sm text-ink-soft mt-0.5">{f.name}{f.meaning ? `: ${f.meaning}` : ''}. From {f.topic}.</p>
+    <div className="grid gap-4">
+      <p className="text-sm text-ink-soft">Grouped by topic. Topics you are most likely to forget by the exam come first.</p>
+      {list.map(g => (
+        <Card key={g.topicId} className="p-4 md:p-5 min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="text-lg font-bold min-w-0 break-words">{g.topic}</h3>
+            {g.studied ? <RecallBar value={g.risk} width="w-36" label="Predicted recall on exam day" /> : <span className="text-xs text-ink-soft">not studied yet</span>}
           </div>
-          {f.studied ? <RecallBar value={f.recall_on_exam} width="w-32" label="Predicted recall on exam day" /> : <span className="text-sm text-ink-soft">not studied</span>}
-        </div>
+          <div className="grid gap-3">
+            {g.items.sort((a, b) => a.id - b.id || (order.get(a.topicId) ?? 0) - (order.get(b.topicId) ?? 0)).map(f => (
+              <div key={f.id} className="rounded-xl bg-paper px-4 py-3 min-w-0">
+                <p className="text-sm font-bold">{f.name}</p>
+                <div className="my-1"><Formula src={f.latex} block /></div>
+                {f.meaning && <div className="text-sm text-ink-soft"><Markdown text={f.meaning} /></div>}
+              </div>
+            ))}
+          </div>
+        </Card>
       ))}
-    </Card>
+    </div>
   );
 }
 

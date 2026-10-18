@@ -10,7 +10,7 @@ interface Topic {
   question_count: number; recall_on_exam: number | null; danger: boolean; calibration: { expectedPct: number; accuracyPct: number; n: number } | null;
   paper_count: number; paper_marks: number;
 }
-interface Source { id: number; title: string; kind: string; pages: number | null; status: string; progress: number; error: string | null; ocr_pages: number; year: number | null }
+interface Source { id: number; title: string; kind: string; pages: number | null; status: string; progress: number; error: string | null; note: string | null; ocr_pages: number; year: number | null }
 interface Paper { id: number; title: string; year: number | null; status: string; error: string | null; questions: number; matched: number }
 interface Unmatched { id: number; number: string; text: string; marks: number; year: number | null }
 interface Triage { active: boolean; requiredMinutes: number; availableMinutes: number; skippedMarks: number; items: { topicId: number; title: string; kind: string; hours: number; marksGain: number; marksPerHour: number; decision: string }[] }
@@ -85,7 +85,7 @@ export default function SubjectDetail() {
             <div className="flex-1 min-w-[240px]">
               <p className="font-bold">Triage mode is on</p>
               <p className="text-ink-soft text-sm mt-0.5">You need about {(d.triage.requiredMinutes / 60).toFixed(1)} hours of study but have {(d.triage.availableMinutes / 60).toFixed(1)} before the exam. {d.triage.skippedMarks >= 0.5
-                ? `Do the topics with the most marks per hour; skipping the rest costs about ${Math.round(d.triage.skippedMarks)} marks.`
+                ? `Do the topics with the most marks per hour; skipping the rest costs about ${Math.round(d.triage.skippedMarks)} mark${Math.round(d.triage.skippedMarks) === 1 ? '' : 's'}.`
                 : 'It is tight: everything fits only if you follow the plan in order, highest marks per hour first.'}</p>
             </div>
             <Button variant="soft" onClick={() => setShowTriage(v => !v)}>{showTriage ? 'Hide list' : 'Show do and skip list'}</Button>
@@ -111,59 +111,58 @@ export default function SubjectDetail() {
         </Card>
       )}
 
-      <div className="grid lg:grid-cols-[1fr_300px] gap-6">
-        <Card className="overflow-hidden">
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_300px] gap-6">
+        <Card className="min-w-0 overflow-hidden">
           {!d.topics.length ? (
             <div className="p-6"><Empty title="No topics yet">Upload a PDF or type your topics on the right.</Empty></div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[640px]">
-                <thead>
-                  <tr className="text-left text-ink-soft border-b border-mist">
-                    <th className="px-5 py-3 font-normal">Topic</th>
-                    <th className="px-3 font-normal">Recall now</th>
-                    <th className="px-3 font-normal">On exam day</th>
-                    <th className="px-3 font-normal text-right">Marks</th>
-                    <th className="px-3 font-normal"><span className="sr-only">Actions</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {chapters.map(ch => (
-                    <Fragment key={ch || 'none'}>{ch && <tr><td colSpan={5} className="px-5 pt-4 pb-1.5 font-display font-bold text-ink-soft">{ch}</td></tr>}
-                      {d.topics.filter(t => (t.chapter ?? '') === ch).map(t => (
-                        <tr key={t.id} className={`border-t border-mist ${t.skip ? 'opacity-45' : ''}`}>
-                          <td className="px-5 py-3">
-                            <p className="font-bold flex items-center gap-1.5">
-                              {t.title}
-                              {t.danger && <span title="You feel sure but score low" className="inline-flex items-center gap-1 rounded-full bg-storm-soft text-storm text-[11px] px-2 py-0.5"><AlertTriangle size={11} /> Risky</span>}
-                            </p>
-                            <p className="text-xs text-ink-soft mt-0.5">
-                              {!t.studied ? `Not studied yet, about ${t.est_learn_min} min to learn`
-                                : t.fade_days != null && t.fade_days < 0.5 ? 'Half forgotten already, review soon'
-                                : `Fades to 50% in ${Math.round(t.fade_days ?? 0)} day${Math.round(t.fade_days ?? 0) === 1 ? '' : 's'}`}
-                              {t.danger && t.calibration && `. You feel ${(t.calibration.expectedPct / 20).toFixed(1)}/5 sure but score ${Math.round(t.calibration.accuracyPct)}%`}
-                            </p>
-                          </td>
-                          <td className="px-3">{t.studied ? <RecallBar value={t.recall_now} /> : <span className="text-ink-soft">–</span>}</td>
-                          <td className="px-3">{t.recall_on_exam != null && (t.studied || t.recall_on_exam > 0) ? <RecallBar value={t.recall_on_exam * (t.mastery || 0.78)} label="Expected share of this topic's marks" /> : <span className="text-ink-soft">–</span>}</td>
-                          <td className="px-3 text-right">
-                            <span className="tabular-nums">{marks(t).toFixed(0)}</span>
-                            {t.weight_source === 'past_papers' && <span className="block text-[11px] text-ink-soft whitespace-nowrap">{t.paper_count ? `asked ${t.paper_count}×` : 'not asked'}</span>}
-                          </td>
-                          <td className="px-3 text-right whitespace-nowrap">
-                            {t.question_count > 0 && <button onClick={() => nav(`/quiz?topicId=${t.id}`)} className="text-act font-bold text-xs mr-3">Quiz</button>}
-                            <button onClick={() => toggleSkip(t)} className="text-ink-soft text-xs hover:text-ink">{t.skip ? 'Unskip' : 'Skip'}</button>
-                          </td>
-                        </tr>
-                      ))}</Fragment>
+            <div className="text-sm">
+              {/* Column headings: only on wider screens. On phones each topic is a small card. */}
+              <div className="hidden md:grid grid-cols-[minmax(0,1fr)_118px_118px_52px_96px] gap-3 px-5 py-3 text-ink-soft border-b border-mist">
+                <span>Topic</span><span>Recall now</span><span>On exam day</span><span className="text-right">Marks</span><span className="sr-only">Actions</span>
+              </div>
+              {chapters.map(ch => (
+                <Fragment key={ch || 'none'}>
+                  {ch && <p className="px-4 md:px-5 pt-4 pb-1.5 font-display font-bold text-ink-soft break-words">{ch}</p>}
+                  {d.topics.filter(t => (t.chapter ?? '') === ch).map(t => (
+                    <div key={t.id} className={`border-t border-mist px-4 md:px-5 py-3 grid gap-x-3 gap-y-2 grid-cols-2 md:grid-cols-[minmax(0,1fr)_118px_118px_52px_96px] md:items-center ${t.skip ? 'opacity-45' : ''}`}>
+                      <div className="col-span-2 md:col-span-1 min-w-0">
+                        <p className="font-bold break-words">
+                          {t.title}
+                          {t.danger && <span title="You feel sure but score low" className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-storm-soft text-storm text-[11px] px-2 py-0.5 align-middle"><AlertTriangle size={11} /> Risky</span>}
+                        </p>
+                        <p className="text-xs text-ink-soft mt-0.5">
+                          {!t.studied ? `Not studied yet, about ${t.est_learn_min} min to learn`
+                            : t.fade_days != null && t.fade_days < 0.5 ? 'Half forgotten already, review soon'
+                            : `Fades to 50% in ${Math.round(t.fade_days ?? 0)} day${Math.round(t.fade_days ?? 0) === 1 ? '' : 's'}`}
+                          {t.danger && t.calibration && `. You feel ${(t.calibration.expectedPct / 20).toFixed(1)}/5 sure but score ${Math.round(t.calibration.accuracyPct)}%`}
+                        </p>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="md:hidden text-[11px] text-ink-soft mb-1">Recall now</p>
+                        {t.studied ? <RecallBar value={t.recall_now} width="w-full" /> : <span className="text-ink-soft">–</span>}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="md:hidden text-[11px] text-ink-soft mb-1">On exam day</p>
+                        {t.recall_on_exam != null && (t.studied || t.recall_on_exam > 0) ? <RecallBar value={t.recall_on_exam * (t.mastery || 0.78)} width="w-full" label="Expected share of this topic's marks" /> : <span className="text-ink-soft">–</span>}
+                      </div>
+                      <div className="md:text-right">
+                        <span className="md:hidden text-ink-soft">Marks </span><span className="tabular-nums font-bold md:font-normal">{marks(t).toFixed(0)}</span>
+                        {t.weight_source === 'past_papers' && <span className="md:block text-[11px] text-ink-soft whitespace-nowrap">{t.paper_count ? ` asked ${t.paper_count}×` : ' not asked'}</span>}
+                      </div>
+                      <div className="text-right whitespace-nowrap">
+                        {t.question_count > 0 && <button onClick={() => nav(`/quiz?topicId=${t.id}`)} className="text-act font-bold text-xs mr-3 py-1">Quiz</button>}
+                        <button onClick={() => toggleSkip(t)} className="text-ink-soft text-xs hover:text-ink py-1">{t.skip ? 'Unskip' : 'Skip'}</button>
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
+                </Fragment>
+              ))}
             </div>
           )}
         </Card>
 
-        <div className="grid gap-4 content-start">
+        <div className="grid gap-4 content-start min-w-0">
           <Card className="p-5">
             <h2 className="font-bold mb-3">Books and notes</h2>
             <label className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-mist-deep p-5 text-center text-sm text-ink-soft cursor-pointer hover:border-act"
@@ -226,17 +225,18 @@ function SourceList({ sources, papers, onDelete }: { sources: Source[]; papers?:
         const paper = papers?.find(p => p.id === src.id);
         return (
           <div key={src.id} className="text-sm group">
-            <div className="flex justify-between gap-2">
-              <span className="truncate font-bold">{src.title}</span>
+            <div className="flex justify-between gap-2 min-w-0">
+              <span className="truncate font-bold min-w-0" title={src.title}>{src.title}</span>
               <span className="flex items-center gap-2 shrink-0">
                 <span className={src.status === 'failed' ? 'text-storm' : 'text-ink-soft'}>
-                  {src.status === 'done' ? (paper ? `${paper.year ?? 'year?'}, ${paper.matched}/${paper.questions} matched` : `${src.pages} pages`) : src.status === 'failed' ? 'Failed' : `${Math.round(src.progress * 100)}%`}
+                  {src.status === 'done' ? (paper ? `${paper.year ?? 'year?'}, ${paper.matched}/${paper.questions} matched` : `${src.pages} page${src.pages === 1 ? '' : 's'}`) : src.status === 'failed' ? 'Failed' : `${Math.round(src.progress * 100)}%`}
                 </span>
                 <button onClick={() => { if (confirm(`Remove ${src.title}?`)) onDelete(src.id); }} aria-label={`Remove ${src.title}`} className="text-ink-soft hover:text-storm"><X size={14} /></button>
               </span>
             </div>
             {src.ocr_pages > 0 && src.status === 'done' && <p className="text-xs text-ink-soft mt-0.5 flex items-center gap-1"><ScanText size={12} /> Read {src.ocr_pages} scanned page{src.ocr_pages === 1 ? '' : 's'} with OCR</p>}
             {(src.status === 'processing' || src.status === 'queued') && <div className="h-1 bg-mist rounded-full mt-1"><div className="h-full bg-act rounded-full transition-all" style={{ width: `${src.progress * 100}%` }} /></div>}
+            {src.note && src.status === 'done' && <p className="text-haze text-xs mt-0.5">{src.note}</p>}
             {src.error && <p className="text-storm text-xs mt-0.5">{src.error}</p>}
           </div>
         );

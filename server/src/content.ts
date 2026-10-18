@@ -53,7 +53,9 @@ export function splitSections(pdf: PdfText, fallbackTitle: string): Section[] {
   if (marks.length < 2 && pdf.outline.length >= 2) {
     for (const o of pdf.outline) {
       const idx = lines.findIndex(l => l.page >= o.page);
-      if (idx >= 0) marks.push({ idx, title: o.title, level: o.level === 1 ? 1 : 2 });
+      // Some PDFs have blank or "." outline entries: skip anything without a real word in it.
+      const title = o.title.replace(/\s+/g, ' ').trim();
+      if (idx >= 0 && /[A-Za-z]{2}|\d/.test(title)) marks.push({ idx, title, level: o.level === 1 ? 1 : 2 });
     }
     marks.sort((a, b) => a.idx - b.idx);
   }
@@ -101,10 +103,38 @@ const sentencesOf = (text: string) =>
   text.replace(/\n(?=[a-z(])/g, ' ').replace(/-\n/g, '').replace(/\n/g, ' ')
     .split(/(?<=[.!?])\s+(?=[A-Z(])/).map(s => s.trim()).filter(s => s.length > 25 && s.length < 320);
 
-const isFormulaLine = (l: string) => {
-  const t = l.trim();
-  return t.includes('=') && t.length >= 3 && t.length <= 70 && /[A-Za-zΔΣπθλμρ]/.test(t) && t.split(/\s+/).length <= 12 && !/[.?!]$/.test(t);
+const count = (s: string, ch: string) => s.split(ch).length - 1;
+/** A line that is a whole formula, not a broken fragment of one (offline method only). */
+export const isFormulaLine = (l: string) => {
+  const t = l.trim().replace(/\s*\(\d+(\.\d+)*\)\s*$/, ''); // drop a trailing equation number
+  if (!t.includes('=') || t.length < 5 || t.length > 90) return false;
+  if (!/[A-Za-zΔΣπθλμρα-ω∇]/.test(t) || /[.?!]$/.test(t)) return false;
+  if ((t.match(/\b[a-z]{4,}\b/gi) ?? []).length > 6) return false;               // prose, not maths
+  if (/^[)\]}|=,+\-−*/·×∈≤≥<>]/.test(t) || /[=(,+\-−*/[{·×∈≤≥<>:]$/.test(t)) return false; // starts or ends mid-formula
+  if (count(t, '(') !== count(t, ')') || count(t, '[') !== count(t, ']') || count(t, '{') !== count(t, '}')) return false;
+  if (count(t, '|') % 2 || count(t, '‖') % 2) return false;
+  const [lhs, ...rest] = t.split('=');
+  const rhs = rest.join('=');
+  if (lhs.replace(/\s/g, '').length < 1 || rhs.replace(/[\s:]/g, '').length < 1) return false;
+  if (/^\s*[a-z]\s*$/i.test(lhs) && /^\s*\d+\s*$/.test(rhs)) return false;           // "i = 1"
+  if ((t.match(/[A-Za-z0-9α-ωΑ-Ω∇]/g) ?? []).length < 3) return false;
+  if (rhs.replace(/[\s:]/g, '').length === 1 && /^[a-z]$/i.test(rhs.trim())) return false;    // "xk = x": a fragment
+  return true;
 };
+
+const UNI: Record<string, string> = {
+  'α': '\\alpha ', 'β': '\\beta ', 'γ': '\\gamma ', 'δ': '\\delta ', 'ε': '\\varepsilon ', 'θ': '\\theta ', 'λ': '\\lambda ', 'μ': '\\mu ',
+  'ν': '\\nu ', 'π': '\\pi ', 'ρ': '\\rho ', 'σ': '\\sigma ', 'τ': '\\tau ', 'φ': '\\phi ', 'ω': '\\omega ', 'Δ': '\\Delta ', 'Σ': '\\Sigma ',
+  'Ω': '\\Omega ', '∇': '\\nabla ', '∈': '\\in ', '∉': '\\notin ', '≤': '\\le ', '≥': '\\ge ', '≠': '\\ne ', '≈': '\\approx ', '∞': '\\infty ',
+  '→': '\\to ', '⇒': '\\Rightarrow ', '⇔': '\\Leftrightarrow ', '∀': '\\forall ', '∃': '\\exists ', '∂': '\\partial ', '×': '\\times ',
+  '·': '\\cdot ', '∩': '\\cap ', '∪': '\\cup ', '⊂': '\\subset ', '⊆': '\\subseteq ', 'ℓ': '\\ell ', '⋆': '^{\\star}', '∗': '^{*}',
+  '‖': '\\| ', '∑': '\\sum ', '∏': '\\prod ', '√': '\\sqrt ', '°': '^{\\circ}', '∅': '\\emptyset ', '⊤': '^{\\top}', 'ℝ': '\\mathbb{R}',
+};
+/** Turn Unicode maths from a PDF's text layer into LaTeX so it typesets (best effort, offline method). */
+export function unicodeToLatex(s: string): string {
+  return [...s].map(c => UNI[c] ?? c).join('').replace(/\s+/g, ' ').trim();
+}
+const MATHY = /[∇∈≤≥λμσ∑∏‖⋆∂ℓ√∞]/g;
 
 const DEF_RE = /^(?:The |An |A )?([A-Z][A-Za-z\- ']{2,40}?)\s+(is|are|refers to|means)\s+(.{10,})$/;
 
@@ -127,9 +157,14 @@ function heuristicTopic(sec: Section): Omit<GenTopic, 'questions'> & { defs: { t
   const compactSel = top.slice(0, 5).sort((a, b) => a.i - b.i).map(x => x.s);
   const detailedSel = top.slice(0, 12).sort((a, b) => a.i - b.i).map(x => x.s);
   const formulas: GenFormula[] = [];
-  for (const l of sec.text.split('\n')) if (isFormulaLine(l) && formulas.length < 6) {
+  for (const l of sec.text.split('\n')) if (isFormulaLine(l) && formulas.length < 8) {
     const lhs = l.split('=')[0].trim();
-    formulas.push({ name: /^[A-Za-zΔΣπθλμρ_0-9 ]{1,6}$/.test(lhs) ? lhs : `${sec.title} equation${formulas.length ? ` ${formulas.length + 1}` : ''}`, latex: l.trim() });
+    const eqNo = l.match(/\((\d+(?:\.\d+)+)\)\s*$/)?.[1];
+    const clean = l.trim().replace(/\s*\(\d+(\.\d+)*\)\s*$/, '');
+    const name = /^[A-Za-zΔΣπθλμρ_0-9 ]{1,6}$/.test(lhs) ? lhs : eqNo ? `Equation (${eqNo})` : `${sec.title}${formulas.length ? ` (${formulas.length + 1})` : ''}`;
+    // Unicode maths is converted to LaTeX; plain chemistry/words stay as they are.
+    formulas.push({ name, latex: MATHY.test(clean) ? unicodeToLatex(clean) : clean });
+    MATHY.lastIndex = 0;
   }
   const BAD_START = /^(During|In|At|When|It|This|These|There|Each|About|After|Before|Its|Their|Both)\b/;
   const defs = sents.map(s => s.match(DEF_RE)).filter(Boolean)
@@ -190,20 +225,62 @@ function heuristicQuestions(topics: ReturnType<typeof heuristicTopic>[]): GenQue
 }
 
 /** Full pipeline for one source. */
-export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgress: (f: number) => void): Promise<GenTopic[]> {
+/** Short, plain reason for an AI failure (credits, key, rate limit), for showing to the student. */
+export function aiFailureReason(e: unknown): string {
+  const m = String((e as Error)?.message ?? e);
+  if (/credit balance/i.test(m)) return 'Claude API has no credits left';
+  if (/invalid x-api-key|authentication|401/i.test(m)) return 'the Claude API key is not valid';
+  if (/rate.?limit|429|overloaded|529/i.test(m)) return 'Claude is busy right now';
+  return 'Claude could not be reached';
+}
+
+/** Copy pages [from..to] (1-based) of the PDF into a small PDF, so Claude can read the real page layout and maths. */
+async function pagesAsPdf(bytes: Uint8Array | undefined, from: number, to: number): Promise<Uint8Array | null> {
+  if (!bytes) return null;
+  try {
+    const { PDFDocument } = await import('pdf-lib');
+    const src = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const out = await PDFDocument.create();
+    const idx = Array.from({ length: to - from + 1 }, (_, i) => from - 1 + i).filter(i => i >= 0 && i < src.getPageCount());
+    for (const p of await out.copyPages(src, idx)) out.addPage(p);
+    return await out.save();
+  } catch { return null; } // text only, if the PDF can't be split
+}
+
+const MAX_PAGES_PER_REQUEST = 12;
+
+export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgress: (f: number) => void, onNote?: (note: string) => void, bytes?: Uint8Array): Promise<GenTopic[]> {
   const sections = splitSections(pdf, sourceTitle).slice(0, 80);
   if (aiEnabled()) {
-    const out: GenTopic[] = [];
-    const byChapter = new Map<string, Section[]>();
-    for (const s of sections) byChapter.set(s.chapter, [...(byChapter.get(s.chapter) ?? []), s]);
-    const allTitles = sections.map(s => s.title);
-    let done = 0;
-    for (const [chapter, secs] of byChapter) {
-      out.push(...await generateChapterWithAI(chapter, secs, allTitles));
-      onProgress(++done / byChapter.size);
+    try {
+      const out: GenTopic[] = [];
+      // Group sections by chapter, then into chunks of at most MAX_PAGES_PER_REQUEST pages.
+      const chunks: { chapter: string; secs: Section[] }[] = [];
+      for (const s of sections) {
+        const last = chunks[chunks.length - 1];
+        const pages = (c: Section[]) => c[c.length - 1].pageTo - c[0].pageFrom + 1;
+        if (last && last.chapter === s.chapter && pages([...last.secs, s]) <= MAX_PAGES_PER_REQUEST) last.secs.push(s);
+        else chunks.push({ chapter: s.chapter, secs: [s] });
+      }
+      const allTitles = sections.map(s => s.title);
+      let done = 0;
+      for (const c of chunks) {
+        const from = c.secs[0].pageFrom;
+        const to = Math.min(c.secs[c.secs.length - 1].pageTo, from + MAX_PAGES_PER_REQUEST * 2 - 1);
+        out.push(...await generateChapterWithAI(c.chapter, c.secs, allTitles, await pagesAsPdf(bytes, from, to)));
+        onProgress(++done / chunks.length);
+      }
+      return out;
+    } catch (e) {
+      // Never fail the upload because of the AI: fall back to the offline method.
+      console.warn('[AI] falling back to offline notes:', (e as Error).message);
+      onNote?.(`Made with the offline method because ${aiFailureReason(e)}. Upload again later for AI-written notes.`);
     }
-    return out;
   }
+  const mathy = (pdf.pages.join('').match(MATHY) ?? []).length;
+  MATHY.lastIndex = 0;
+  const density = mathy / Math.max(1, pdf.pages.join('').length / 1000);
+  if ((mathy > 12 || density > 3) && !aiEnabled()) onNote?.('This PDF has a lot of maths. The offline method can only copy formulas that come out as clean text, so some may be missing. Add a Claude API key for exact LaTeX formulas and notes.');
   const base = sections.map(heuristicTopic);
   const qs = heuristicQuestions(base);
   onProgress(1);

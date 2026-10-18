@@ -56,7 +56,7 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-[1.1fr_1fr]">
+    <div className="min-h-screen grid lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
       <section className="hidden lg:flex flex-col justify-between bg-solid text-on-solid p-14">
         <span className="font-display font-extrabold text-lg">Exam Readiness Engine</span>
         <div>

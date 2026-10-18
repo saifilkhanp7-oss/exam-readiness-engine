@@ -28,28 +28,101 @@ const TopicSchema = z.object({
 });
 const ChapterSchema = z.object({ topics: z.array(TopicSchema) });
 
-const SYSTEM = `You turn textbook chapters into exam-prep material for a student.
-Return ONLY JSON matching: {"topics":[{"title","difficulty"(0-1),"importance"(0-10, how likely in exams),"est_learn_min","line"(one sentence, the single most important fact),"compact"(3-6 markdown bullets),"detailed"(markdown, full explanation with examples, use $...$ for math),"simple"(plain-language paragraph a 14-year-old understands),"formulas":[{"name","latex","meaning"}],"questions":[{"prompt","options"(4),"answer"(index),"explanation","option_topics"(for each option, the title of the topic it really belongs to, or null for the correct one)}]}]}
-Rules: 4-8 MCQs per topic. Wrong options must be plausible and, where possible, come from a closely related topic in the list given (this is used to detect confusion). Use simple English. Never invent facts that are not in the text.`;
+// The answer comes back through a tool call, so LaTeX backslashes survive JSON intact.
+const SAVE_TOOL = {
+  name: 'save_topics',
+  description: 'Save the exam-prep topics made from this part of the book.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      topics: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            difficulty: { type: 'number', description: '0 easy to 1 hard' },
+            importance: { type: 'number', description: '0-10, how likely in exams' },
+            est_learn_min: { type: 'number', description: 'minutes to learn it the first time' },
+            line: { type: 'string', description: 'One sentence: the single most important fact. Math in $...$.' },
+            compact: { type: 'string', description: '3-6 markdown bullets. Math in $...$.' },
+            detailed: { type: 'string', description: 'Full markdown explanation with an example. Inline math $...$, important equations on their own line as $$...$$.' },
+            simple: { type: 'string', description: 'Plain-language paragraph a 14-year-old understands. Minimal math.' },
+            formulas: {
+              type: 'array',
+              description: 'Every important formula, definition or condition in this section, complete.',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'Short name, e.g. "Lagrangian" or "Second-order sufficient condition"' },
+                  latex: { type: 'string', description: 'The complete formula as LaTeX, without $ signs, e.g. "L(x,\\lambda)=f(x)-\\sum_{i=1}^{m}\\lambda_i c_i(x)"' },
+                  meaning: { type: 'string', description: 'What each symbol means and when it applies, one sentence. Include the book equation number if any.' },
+                },
+                required: ['name', 'latex', 'meaning'],
+              },
+            },
+            questions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  prompt: { type: 'string', description: 'Math in $...$' },
+                  options: { type: 'array', items: { type: 'string' }, description: 'Exactly 4. Math in $...$' },
+                  answer: { type: 'integer', description: 'index 0-3 of the correct option' },
+                  explanation: { type: 'string' },
+                  option_topics: { type: 'array', items: { type: ['string', 'null'] }, description: 'For each option, the title of the topic it really belongs to; null for the correct one' },
+                },
+                required: ['prompt', 'options', 'answer', 'explanation', 'option_topics'],
+              },
+            },
+          },
+          required: ['title', 'difficulty', 'importance', 'est_learn_min', 'line', 'compact', 'detailed', 'simple', 'formulas', 'questions'],
+        },
+      },
+    },
+    required: ['topics'],
+  },
+};
+
+const SYSTEM = `You turn textbook chapters into exam-prep material for a student, and save it with the save_topics tool.
+Rules:
+- Read formulas from the attached PDF pages, not from the extracted text (extracted text often garbles maths). Copy every formula exactly and completely: subscripts, superscripts, sums, norms, sets and conditions.
+- Write ALL maths as LaTeX: inline $...$ and display $$...$$ in notes, plain LaTeX (no $) in formulas[].latex. Use \\lambda, x_k, \\nabla f(x^*), \\|x\\|, \\in, \\le, \\sum_{i=1}^m and so on. Never write maths as plain Unicode text.
+- One topic per section given. 4-8 multiple-choice questions per topic; wrong options plausible and, where possible, from a closely related topic in the list given (this is used to detect confusion).
+- Simple English. Never invent facts that are not in the book.`;
+
+const pdfDoc = (bytes: Uint8Array) => ({
+  type: 'document' as const,
+  source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: Buffer.from(bytes).toString('base64') },
+});
 
 export async function generateChapterWithAI(
   chapter: string,
   sections: { title: string; pageFrom: number; pageTo: number; text: string }[],
   allTopicTitles: string[],
+  pagesPdf?: Uint8Array | null,
 ): Promise<GenTopic[]> {
-  const body = sections.map(s => `### ${s.title} (pages ${s.pageFrom}-${s.pageTo})\n${s.text.slice(0, 12000)}`).join('\n\n');
-  const user = `Chapter: ${chapter}\nAll topic titles in this book (for option_topics): ${JSON.stringify(allTopicTitles)}\n\nMake one topic per section below.\n\n${body}`;
+  const body = sections.map(s => `### ${s.title} (book pages ${s.pageFrom}-${s.pageTo})\n${s.text.slice(0, 12000)}`).join('\n\n');
+  const text = `Chapter: ${chapter}\nAll topic titles in this book (for option_topics): ${JSON.stringify(allTopicTitles)}\n\n`
+    + (pagesPdf ? 'The attached PDF contains exactly these pages. ' : '')
+    + `Make one topic per section below. Extracted text (may have broken maths) for reference:\n\n${body}`;
+  const content = pagesPdf ? [pdfDoc(pagesPdf), { type: 'text' as const, text }] : [{ type: 'text' as const, text }];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await ai().messages.create({ model: MODEL, max_tokens: 16000, system: SYSTEM, messages: [{ role: 'user', content: user }] });
-    const text = res.content.map(c => (c.type === 'text' ? c.text : '')).join('');
+    const res = await ai().messages.create({
+      model: MODEL, max_tokens: 16000, system: SYSTEM,
+      tools: [SAVE_TOOL], tool_choice: { type: 'tool', name: 'save_topics' },
+      messages: [{ role: 'user', content }],
+    });
     try {
-      const json = ChapterSchema.parse(JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)));
+      const call = res.content.find(c => c.type === 'tool_use');
+      const json = ChapterSchema.parse(call && 'input' in call ? call.input : {});
       return json.topics.map((t, i) => {
         const sec = sections[Math.min(i, sections.length - 1)];
         return {
           title: t.title, chapter, difficulty: t.difficulty, importance: Math.max(0.5, t.importance),
           estLearnMin: Math.round(t.est_learn_min), pageFrom: sec.pageFrom, pageTo: sec.pageTo,
-          line: t.line, compact: t.compact, detailed: t.detailed, simple: t.simple, formulas: t.formulas,
+          line: t.line, compact: t.compact, detailed: t.detailed, simple: t.simple,
+          formulas: t.formulas.map(f => ({ ...f, latex: f.latex.trim().replace(/^\$+|\$+$/g, '') })),
           questions: t.questions.map(q => ({ prompt: q.prompt, options: q.options, answer: q.answer, explanation: q.explanation, distractorTopics: q.option_topics, page: sec.pageFrom })),
         };
       });

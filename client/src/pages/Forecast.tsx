@@ -74,7 +74,7 @@ export default function Forecast() {
             const delta = prev == null ? null : f.readiness - prev;
             return (
               <Card key={s.id} className="p-5 md:p-6">
-                <div className="grid md:grid-cols-[200px_1fr_180px] gap-5 md:gap-8 items-center">
+                <div className="grid lg:grid-cols-[190px_minmax(0,1fr)_170px] gap-5 lg:gap-8 items-center">
                   <Link to={`/subjects/${s.id}`} className="group">
                     <div className="flex items-center gap-2">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ background: s.color }} />
@@ -91,8 +91,8 @@ export default function Forecast() {
                     </div>
                     <div className="flex-1 min-w-0 w-full"><ScoreBand f={f} color={c.tone} /></div>
                   </div>
-                  <div className="h-14 hidden md:block" aria-label="Readiness over the last two weeks">
-                    {hist.length > 1 && window.matchMedia('(min-width: 768px)').matches && (
+                  <div className="h-14 hidden lg:block" aria-label="Readiness over the last two weeks">
+                    {hist.length > 1 && window.matchMedia('(min-width: 1024px)').matches && (
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={hist}>
                           <YAxis hide domain={[0, 100]} />
@@ -110,7 +110,7 @@ export default function Forecast() {
         </div>
       )}
 
-      <div className="grid lg:grid-cols-[1.1fr_1fr] gap-6 mt-10">
+      <div className="grid lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] gap-6 mt-10">
         <section>
           <div className="flex items-baseline justify-between mb-3">
             <h2 className="text-xl font-bold">Today's plan</h2>

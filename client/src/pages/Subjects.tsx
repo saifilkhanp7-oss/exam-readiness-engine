@@ -41,7 +41,7 @@ function AddSubjects({ onDone, onClose }: { onDone: () => void; onClose: () => v
       </div>
       <div className="grid gap-4">
         {rows.map((r, i) => (
-          <div key={i} className="grid gap-3 md:grid-cols-[1.4fr_1fr_90px_1.4fr_auto] items-start rounded-xl bg-paper p-3">
+          <div key={i} className="grid gap-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_90px_minmax(0,1.4fr)_auto] items-start rounded-xl bg-paper p-3">
             <input value={r.name} onChange={e => set(i, { name: e.target.value })} placeholder="Subject, e.g. Physics" aria-label="Subject name"
               className="rounded-lg border border-mist-deep bg-card px-3 py-2.5 outline-none focus:border-act" />
             <input type="date" value={r.examAt} onChange={e => set(i, { examAt: e.target.value })} aria-label="Exam date"

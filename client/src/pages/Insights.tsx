@@ -122,7 +122,7 @@ export default function Insights() {
 
       {model && <PersonalModel m={model} onRefit={refit} />}
 
-      <div className="grid lg:grid-cols-[1.3fr_1fr] gap-6">
+      <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] gap-6">
         <Card className="p-5 md:p-6">
           <h2 className="text-xl font-bold">How sure you feel vs how you score</h2>
           <p className="text-sm text-ink-soft mt-1">Dots below the line are topics where you feel better than you score. Those are the dangerous ones.</p>

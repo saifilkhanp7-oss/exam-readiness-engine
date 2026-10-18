@@ -66,7 +66,8 @@ async function processSource(id: number) {
       setStatus(id, 'processing', 0.6);
       await processPastPaper(id, src.subject_id, src.title, pdf.pages);
     } else {
-      const topics = await generateTopics(pdf, src.title, f => setStatus(id, 'processing', 0.5 + f * 0.45));
+      const topics = await generateTopics(pdf, src.title, f => setStatus(id, 'processing', 0.5 + f * 0.45),
+        note => db.prepare('UPDATE sources SET note=? WHERE id=?').run(note, id), data);
       if (!topics.length) throw new Error('Could not find any topics in this PDF.');
       saveGenerated(src.subject_id, id, topics);
     }
