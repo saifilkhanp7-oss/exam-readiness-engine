@@ -80,8 +80,13 @@ export function Formula({ src, block = false }: { src: string; block?: boolean }
     const html = katex.renderToString(tex, { throwOnError: false, displayMode: block });
     return <span className="katex-wrap" dangerouslySetInnerHTML={{ __html: html }} />;
   }
-  const parts = src.split(/(?<=[A-Za-z)])(\d+)/g);
-  return <span className="font-display">{parts.map((p, i) => (i % 2 ? <sub key={i}>{p}</sub> : <span key={i}>{p}</span>))}</span>;
+  // Digits right after a letter or ")" become subscripts (no regex lookbehind: older iPhones can't parse it).
+  const parts: { t: string; sub: boolean }[] = [];
+  for (const m of src.matchAll(/([A-Za-z)])(\d+)|[^]/g)) {
+    if (m[2]) { parts.push({ t: m[1], sub: false }, { t: m[2], sub: true }); }
+    else parts.push({ t: m[0], sub: false });
+  }
+  return <span className="font-display">{parts.map((p, i) => (p.sub ? <sub key={i}>{p.t}</sub> : <span key={i}>{p.t}</span>))}</span>;
 }
 
 /** Tiny markdown: bullets, bold, inline code, $math$, tables. Enough for generated notes. */

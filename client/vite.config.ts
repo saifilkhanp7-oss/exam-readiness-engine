@@ -41,5 +41,7 @@ export default defineConfig({
       devOptions: { enabled: false },
     }),
   ],
+  // Older iPhones (iOS 15 Safari) need modern syntax lowered.
+  build: { target: ['es2020', 'safari15'] },
   server: { port: 5173, proxy: { '/api': `http://localhost:${process.env.API_PORT || 3001}` } },
 });
