@@ -4,10 +4,6 @@ A study app that learns how fast **you** forget each topic, plans revision aroun
 
 Full design and formulas: [spec.md](spec.md).
 
-| Light | Dark |
-|---|---|
-| ![Forecast, light](docs/screenshots/forecast-light.png) | ![Forecast, dark](docs/screenshots/forecast-dark.png) |
-
 ## Features
 
 - **Email code login**: sign up with name + email, log in with a 6-digit code, stay logged in for a year.
