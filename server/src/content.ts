@@ -232,8 +232,10 @@ export function aiFailureReason(e: unknown): string {
   if (e instanceof AiDailyLimitError) return "Gemini's free daily limit is used up";
   if (/credit balance/i.test(m)) return 'Claude API has no credits left';
   if (/invalid x-api-key|authentication|401|API key not valid|API_KEY_INVALID|PERMISSION_DENIED|403/i.test(m)) return `the ${who} API key is not valid`;
-  if (/rate.?limit|429|overloaded|529|503|RESOURCE_EXHAUSTED/i.test(m)) return `${who} is busy right now`;
+  if (/NO_FREE_QUOTA/.test(m)) return `your Gemini key has no free quota for this model`;
+  if (/rate.?limit|429|overloaded|529|503|RESOURCE_EXHAUSTED/i.test(m)) return `${who} refused because of its per-minute limit`;
   if (/404|NOT_FOUND/i.test(m)) return `the ${who} model name was not found`;
+  if (/\b400\b|INVALID_ARGUMENT/i.test(m)) return `${who} rejected that part of the file`;
   return `${who} could not be reached`;
 }
 
@@ -255,18 +257,18 @@ const MAX_PAGES_PER_REQUEST = 12;
 export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgress: (f: number) => void, onNote?: (note: string) => void, bytes?: Uint8Array): Promise<GenTopic[]> {
   const sections = splitSections(pdf, sourceTitle).slice(0, 80);
   if (aiEnabled()) {
+    const out: GenTopic[] = [];
+    // Group sections by chapter, then into chunks of at most MAX_PAGES_PER_REQUEST pages.
+    const chunks: { chapter: string; secs: Section[] }[] = [];
+    for (const s of sections) {
+      const last = chunks[chunks.length - 1];
+      const pages = (c: Section[]) => c[c.length - 1].pageTo - c[0].pageFrom + 1;
+      if (last && last.chapter === s.chapter && pages([...last.secs, s]) <= MAX_PAGES_PER_REQUEST) last.secs.push(s);
+      else chunks.push({ chapter: s.chapter, secs: [s] });
+    }
+    const allTitles = sections.map(s => s.title);
+    let done = 0;
     try {
-      const out: GenTopic[] = [];
-      // Group sections by chapter, then into chunks of at most MAX_PAGES_PER_REQUEST pages.
-      const chunks: { chapter: string; secs: Section[] }[] = [];
-      for (const s of sections) {
-        const last = chunks[chunks.length - 1];
-        const pages = (c: Section[]) => c[c.length - 1].pageTo - c[0].pageFrom + 1;
-        if (last && last.chapter === s.chapter && pages([...last.secs, s]) <= MAX_PAGES_PER_REQUEST) last.secs.push(s);
-        else chunks.push({ chapter: s.chapter, secs: [s] });
-      }
-      const allTitles = sections.map(s => s.title);
-      let done = 0;
       for (const c of chunks) {
         const from = c.secs[0].pageFrom;
         const to = Math.min(c.secs[c.secs.length - 1].pageTo, from + MAX_PAGES_PER_REQUEST * 2 - 1);
@@ -276,10 +278,21 @@ export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgre
       return out;
     } catch (e) {
       if (e instanceof AiDailyLimitError) throw e; // the job waits for the daily reset instead
-      // Never fail the upload because of the AI: fall back to the offline method.
+      // Never fail the upload because of the AI. Keep what the AI already made; the rest uses the offline method.
       console.warn('[AI] falling back to offline notes:', (e as Error).message);
       const why = aiFailureReason(e);
-      onNote?.(`Made with the offline method because ${why}. ${/not valid|not found/.test(why) ? 'Check the key or model name in your Railway variables, then upload again' : 'Upload again later'} for AI-written notes.`);
+      const fix = /no free quota/.test(why) ? `Set GEMINI_MODEL to gemini-3.5-flash-lite in Railway, then upload again`
+        : /not valid|not found/.test(why) ? 'Check the key or model name in your Railway variables, then upload again'
+        : 'Delete this file and upload it again later';
+      const rest = chunks.slice(done).flatMap(c => c.secs);
+      if (done > 0) {
+        const pg = `${rest[0].pageFrom}–${rest[rest.length - 1].pageTo}`;
+        onNote?.(`${aiName()} made notes for the first part. Pages ${pg} were made with the offline method because ${why}. ${fix} for AI notes on those pages too.`);
+        const base = rest.map(heuristicTopic);
+        const qs = heuristicQuestions(base);
+        return [...out, ...base.map(({ defs, ...t }, i) => ({ ...t, questions: qs[i] }))];
+      }
+      onNote?.(`Made with the offline method because ${why}. ${fix} for AI-written notes.`);
     }
   }
   const mathy = (pdf.pages.join('').match(MATHY) ?? []).length;

@@ -49,8 +49,18 @@ interface GeminiAsk { system: string; text: string; pdf?: Uint8Array | null; sch
 
 /** Interactions API (Google's current API; works with the new "AQ." auth keys). Falls back to generateContent if needed. */
 let useLegacy = false;
+// Free tier allows only a few requests per minute: keep a gap between requests (GEMINI_MIN_GAP_SECONDS, default 15).
+let nextSlot = 0;
+async function waitTurn() {
+  const gap = Number(process.env.GEMINI_MIN_GAP_SECONDS ?? 15) * 1000;
+  const wait = Math.max(0, nextSlot - Date.now());
+  nextSlot = Math.max(Date.now(), nextSlot) + gap;
+  if (wait) await sleep(wait);
+}
+
 async function gemini(a: GeminiAsk, retries: number): Promise<string> {
   for (let attempt = 0; ; attempt++) {
+    await waitTurn();
     const legacy = useLegacy;
     const url = legacy
       ? `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
@@ -95,11 +105,14 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
       console.warn('[AI] Gemini Interactions API not usable, switching to generateContent:', msg);
       useLegacy = true; attempt--; continue;
     }
-    // Free tier: per-day quota → wait for the reset; per-minute quota or overload → short wait and retry.
-    if (res.status === 429 && /PerDay/i.test(details + msg)) throw new AiDailyLimitError();
+    console.warn(`[AI] Gemini ${res.status} (attempt ${attempt + 1}): ${(err.error?.message ?? '').slice(0, 300)}`);
+    // "limit: 0" = this key/project gets no free quota for this model at all; waiting will not help.
+    if (res.status === 429 && /limit:\s*0\b/.test(msg)) throw new Error(`Gemini error: NO_FREE_QUOTA for ${GEMINI_MODEL}: ${msg}`);
+    // Free tier: per-day quota → wait for the reset; per-minute quota or overload → wait and retry.
+    if (res.status === 429 && /PerDay|per day|daily/i.test(details + msg)) throw new AiDailyLimitError();
     if ((res.status === 429 || res.status === 503 || res.status === 500) && attempt < retries) {
-      const delay = Number(/"retryDelay":"(\d+)/.exec(details)?.[1] ?? 20);
-      await sleep(Math.min(70, delay + 2) * 1000);
+      const delay = Number(/"retryDelay":"(\d+)/.exec(details)?.[1] ?? 0) || (res.status === 429 ? 60 : 20);
+      nextSlot = Math.max(nextSlot, Date.now() + Math.min(90, delay + 3) * 1000); // also holds back other requests
       continue;
     }
     throw new Error(`Gemini error: ${msg}`);
@@ -109,7 +122,7 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
 /** Ask for structured output matching SAVE_TOOL's schema. Returns the parsed object. */
 async function askTopics(system: string, pdf: Uint8Array | null | undefined, text: string): Promise<unknown> {
   if (aiProvider() === 'gemini') {
-    const out = await gemini({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 32768 }, 4);
+    const out = await gemini({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 32768 }, 6);
     try { return JSON.parse(out.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { return {}; } // invalid JSON → schema check fails → one retry
   }
   const content = pdf ? [pdfDoc(pdf), { type: 'text' as const, text }] : [{ type: 'text' as const, text }];
@@ -231,7 +244,9 @@ export async function generateChapterWithAI(
   allTopicTitles: string[],
   pagesPdf?: Uint8Array | null,
 ): Promise<GenTopic[]> {
-  const body = sections.map(s => `### ${s.title} (book pages ${s.pageFrom}-${s.pageTo})\n${s.text.slice(0, 12000)}`).join('\n\n');
+  // Gemini reads the PDF pages itself, so a short excerpt per section is enough (keeps free-tier token use low).
+  const limit = pagesPdf && aiProvider() === 'gemini' ? 400 : 12000;
+  const body = sections.map(s => `### ${s.title} (book pages ${s.pageFrom}-${s.pageTo})\n${s.text.slice(0, limit)}`).join('\n\n');
   const text = `Chapter: ${chapter}\nAll topic titles in this book (for option_topics): ${JSON.stringify(allTopicTitles)}\n\n`
     + (pagesPdf ? 'The attached PDF contains exactly these pages. ' : '')
     + `Make one topic per section below. Extracted text (may have broken maths) for reference:\n\n${body}`;
