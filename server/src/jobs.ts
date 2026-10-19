@@ -105,25 +105,15 @@ async function processSource(id: number) {
   } catch (e) {
     if (e instanceof AiDailyLimitError) {
       // Free daily quota used up: wait for the reset (midnight US Pacific) and carry on by itself.
-      const at = nextPacificMidnight() + 5 * 60_000;
+      const at = e.resetAt;
       db.prepare("UPDATE sources SET status='queued', progress=0, retry_after=?, note=? WHERE id=?")
-        .run(at, "Gemini's free daily limit is used up. This file will carry on by itself after the limit resets.", id);
-      console.warn('[JOB] source', id, 'waiting for Gemini daily reset until', new Date(at).toISOString());
+        .run(at, `${aiName()}'s free daily limit is used up. This file will carry on by itself after the limit resets.`, id);
+      console.warn('[JOB] source', id, `waiting for ${aiName()} daily reset until`, new Date(at).toISOString());
       return;
     }
     console.error('[JOB] source', id, (e as Error).message);
     setStatus(id, 'failed', 0, (e as Error).message);
   }
-}
-
-/** Gemini's daily quota resets at midnight US Pacific time. */
-function nextPacificMidnight(now = Date.now()): number {
-  const d = new Date(now);
-  const la = new Date(d.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const offset = la.getTime() - utc.getTime();            // Pacific minus UTC, e.g. -7 h
-  const day = 86_400_000;
-  return (Math.floor((now + offset) / day) + 1) * day - offset;
 }
 
 let running = false;

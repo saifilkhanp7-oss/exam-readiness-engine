@@ -236,7 +236,7 @@ function SourceList({ sources, papers, onDelete }: { sources: Source[]; papers?:
               </span>
             </div>
             {src.ocr_pages > 0 && src.status === 'done' && <p className="text-xs text-ink-soft mt-0.5 flex items-center gap-1"><ScanText size={12} /> Read {src.ocr_pages} scanned or handwritten page{src.ocr_pages === 1 ? '' : 's'}</p>}
-            {waiting && <p className="text-haze text-xs mt-0.5">Gemini's free daily limit is used up. This file carries on by itself at {new Date(src.retry_after!).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</p>}
+            {waiting && <p className="text-haze text-xs mt-0.5">The free daily AI limit is used up. This file carries on by itself at {new Date(src.retry_after!).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</p>}
             {(src.status === 'processing' || src.status === 'queued') && !waiting && <div className="h-1 bg-mist rounded-full mt-1"><div className="h-full bg-act rounded-full transition-all" style={{ width: `${src.progress * 100}%` }} /></div>}
             {src.note && src.status === 'done' && <p className="text-haze text-xs mt-0.5">{src.note}</p>}
             {src.error && <p className="text-storm text-xs mt-0.5">{src.error}</p>}

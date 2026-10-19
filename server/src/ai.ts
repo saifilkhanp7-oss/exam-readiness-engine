@@ -1,31 +1,42 @@
-// AI wrapper for Claude (paid, best quality) or Google Gemini (has a free tier).
+// AI wrapper for Claude (paid, best quality), Google Gemini (free tier) or OpenRouter (free models, or any paid model).
 // Rule: the AI writes content and explains numbers — it never computes them.
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import type { GenTopic } from './content.ts';
+import { renderPagesJpeg } from './ocr.ts';
 
-export type Provider = 'claude' | 'gemini';
-/** Which AI to use. Both keys set: Claude, unless AI_PROVIDER=gemini. */
+export type Provider = 'claude' | 'gemini' | 'openrouter';
+/** Which AI to use: AI_PROVIDER if that key is set, otherwise Claude, then Gemini, then OpenRouter. */
 export function aiProvider(): Provider | null {
-  const claude = Boolean(process.env.ANTHROPIC_API_KEY), gemini = Boolean(process.env.GEMINI_API_KEY);
-  const pref = (process.env.AI_PROVIDER || '').toLowerCase();
-  if (pref === 'gemini' && gemini) return 'gemini';
-  if (pref === 'claude' && claude) return 'claude';
-  return claude ? 'claude' : gemini ? 'gemini' : null;
+  const has = { claude: Boolean(process.env.ANTHROPIC_API_KEY), gemini: Boolean(process.env.GEMINI_API_KEY), openrouter: Boolean(process.env.OPENROUTER_API_KEY) };
+  const pref = (process.env.AI_PROVIDER || '').toLowerCase() as Provider;
+  if (pref in has && has[pref]) return pref;
+  return has.claude ? 'claude' : has.gemini ? 'gemini' : has.openrouter ? 'openrouter' : null;
 }
 export const aiEnabled = () => aiProvider() !== null;
-export const aiName = () => (aiProvider() === 'gemini' ? 'Gemini' : 'Claude');
+export const aiName = () => ({ claude: 'Claude', gemini: 'Gemini', openrouter: 'OpenRouter' } as const)[aiProvider() ?? 'claude'];
 /** Largest PDF chunk (raw bytes) we send in one request. Gemini inline requests are smaller. */
 export const maxChunkBytes = () => (aiProvider() === 'gemini' ? 14 : 18) * 1024 * 1024;
+/** Pages per request: Gemini thinks first (same token budget) and free OpenRouter models are smaller, so fewer pages. */
+export const pagesPerAiRequest = (claudePages: number) => (aiProvider() === 'claude' ? claudePages : 6);
 
 const CLAUDE_MODEL = process.env.AI_MODEL || 'claude-sonnet-5-5';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 let client: Anthropic | null = null;
 const claude = () => (client ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
 
-/** Gemini's free daily quota is used up. The job waits and carries on after the reset. */
+/** A free daily quota is used up. The job waits until resetAt and carries on by itself. */
 export class AiDailyLimitError extends Error {
-  constructor() { super('Gemini free daily limit reached'); }
+  constructor(public resetAt: number) { super('free daily AI limit reached'); }
+}
+/** Gemini's daily quota resets at midnight US Pacific time. */
+export function nextPacificMidnight(now = Date.now()): number {
+  const d = new Date(now);
+  const la = new Date(d.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
+  const offset = la.getTime() - utc.getTime();
+  const day = 86_400_000;
+  return (Math.floor((now + offset) / day) + 1) * day - offset;
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -130,7 +141,7 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
     // "limit: 0" = this key/project gets no free quota for this model at all; waiting will not help.
     if (res.status === 429 && /limit:\s*0\b/.test(msg)) throw new Error(`Gemini error: NO_FREE_QUOTA for ${GEMINI_MODEL}: ${msg}`);
     // Free tier: per-day quota → wait for the reset; per-minute quota or overload → wait and retry.
-    if (res.status === 429 && /PerDay|per day|daily/i.test(details + msg)) throw new AiDailyLimitError();
+    if (res.status === 429 && /PerDay|per day|daily/i.test(details + msg)) throw new AiDailyLimitError(nextPacificMidnight() + 5 * 60_000);
     if ((res.status === 429 || res.status === 503 || res.status === 500) && attempt < retries) {
       const delay = Number(/"retryDelay":"(\d+)/.exec(details)?.[1] ?? 0) || (res.status === 429 ? 60 : 20);
       nextSlot = Math.max(nextSlot, Date.now() + Math.min(90, delay + 3) * 1000); // also holds back other requests
@@ -140,8 +151,84 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
   }
 }
 
+// ---------- OpenRouter (OpenAI-style chat API; free ":free" models or any paid model) ----------
+
+const OPENROUTER_FALLBACK = 'openrouter/free'; // picks a free model that supports the request (images, JSON)
+let openrouterModel = process.env.OPENROUTER_MODEL || 'thinkingmachines/inkling-small:free';
+let orSchema = true; // dropped if no endpoint for the model supports structured output
+let orNext = 0;
+const stripFences = (t: string) => t.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+
+async function openrouter(a: GeminiAsk, retries: number): Promise<string> {
+  const images = a.pdf ? await renderPagesJpeg(a.pdf) : [];
+  for (let attempt = 0; ; attempt++) {
+    const gap = Number(process.env.OPENROUTER_MIN_GAP_SECONDS ?? 4) * 1000;
+    const wait = Math.max(0, orNext - Date.now());
+    orNext = Math.max(Date.now(), orNext) + gap;
+    if (wait) await sleep(wait);
+
+    const schemaNote = a.schema && !orSchema ? `\n\nReply with ONLY a JSON object (no markdown) that matches this JSON Schema:\n${JSON.stringify(a.schema)}` : '';
+    const imgNote = images.length ? `\n\nThe ${images.length} pages are attached as images, in order (image 1 = the first page in the range). Treat them as the attached PDF pages.` : '';
+    const body = {
+      model: openrouterModel,
+      max_tokens: a.maxTokens,
+      messages: [
+        { role: 'system', content: a.system + schemaNote },
+        { role: 'user', content: [{ type: 'text', text: a.text + imgNote }, ...images.map(b64 => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } }))] },
+      ],
+      ...(a.schema && orSchema ? { response_format: { type: 'json_schema', json_schema: { name: 'save_topics', strict: false, schema: a.schema } }, provider: { require_parameters: true } } : {}),
+    };
+    let res: Response;
+    try {
+      res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.OPENROUTER_API_KEY!.trim()}`, 'HTTP-Referer': process.env.APP_URL || 'https://github.com/exam-readiness-engine', 'X-Title': 'Exam Readiness Engine' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10 * 60_000),
+      });
+    } catch (e) {
+      console.warn('[AI] OpenRouter network error:', (e as Error).message);
+      if (attempt < retries) continue;
+      throw new Error(`OpenRouter network error: ${(e as Error).message}`);
+    }
+    const data: any = await res.json().catch(() => ({}));
+    const err = data.error ?? (res.ok ? null : { code: res.status, message: res.statusText });
+    if (!err) {
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content;
+      const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((c: any) => c.text ?? '').join('') : '';
+      if (choice?.finish_reason === 'length') throw new Error('OpenRouter answer was cut off (too long)');
+      if (!text) throw new Error(`OpenRouter returned no text (${choice?.finish_reason ?? 'unknown'})`);
+      return text;
+    }
+    const code = Number(err.code) || res.status;
+    const msg = `${code} ${String(err.message ?? '')} ${JSON.stringify(err.metadata ?? '').slice(0, 300)}`;
+    console.warn(`[AI] OpenRouter ${code} (attempt ${attempt + 1}, model ${openrouterModel}): ${msg.slice(0, 300)}`);
+    // Model gone, or no provider for it can take images / JSON output: adjust and try again.
+    if (orSchema && /requested parameters|response_format|structured/i.test(msg) && code !== 429) { orSchema = false; attempt--; continue; }
+    if (openrouterModel !== OPENROUTER_FALLBACK && (code === 404 || /no endpoints|not a valid model|image input/i.test(msg))) {
+      console.warn(`[AI] OpenRouter model ${openrouterModel} not usable, switching to ${OPENROUTER_FALLBACK}`);
+      openrouterModel = OPENROUTER_FALLBACK; attempt--; continue;
+    }
+    if (code === 429 && /per.?day|daily/i.test(msg)) {
+      const reset = Number(err.metadata?.headers?.['X-RateLimit-Reset']);
+      const day = 86_400_000;
+      throw new AiDailyLimitError(reset > Date.now() ? reset + 60_000 : (Math.floor(Date.now() / day) + 1) * day + 5 * 60_000);
+    }
+    if ([429, 500, 502, 503, 408].includes(code) && attempt < retries) {
+      orNext = Math.max(orNext, Date.now() + (code === 429 ? 30_000 : 10_000));
+      continue;
+    }
+    throw new Error(`OpenRouter error: ${msg}`);
+  }
+}
+
 /** Ask for structured output matching SAVE_TOOL's schema. Returns the parsed object. */
 async function askTopics(system: string, pdf: Uint8Array | null | undefined, text: string): Promise<unknown> {
+  if (aiProvider() === 'openrouter') {
+    const out = await openrouter({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 16000 }, 6);
+    try { return JSON.parse(stripFences(out)); } catch { return {}; }
+  }
   if (aiProvider() === 'gemini') {
     const out = await gemini({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 65536 }, 6);
     try { return JSON.parse(out.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { return {}; } // invalid JSON → schema check fails → one retry
@@ -158,6 +245,7 @@ async function askTopics(system: string, pdf: Uint8Array | null | undefined, tex
 
 /** Plain text answer (used for small jobs: question matching, wording). */
 async function askText(system: string, text: string, maxTokens: number, retries = 2): Promise<string> {
+  if (aiProvider() === 'openrouter') return openrouter({ system, text, maxTokens: Math.max(maxTokens, 4000) }, retries);
   if (aiProvider() === 'gemini') {
     return gemini({ system, text, maxTokens: Math.max(maxTokens, 8192) }, retries);
   }

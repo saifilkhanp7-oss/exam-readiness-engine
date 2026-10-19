@@ -1,7 +1,7 @@
 // Turns extracted book text into topics, notes (3 levels), formulas and quiz questions.
 // Uses Claude when ANTHROPIC_API_KEY is set; otherwise a heuristic fallback so the app runs without a key.
 import type { PdfText } from './pdf.ts';
-import { AiDailyLimitError, aiEnabled, aiName, aiProvider, generateChapterWithAI, generateFromPagesWithAI, maxChunkBytes } from './ai.ts';
+import { AiDailyLimitError, aiEnabled, aiName, pagesPerAiRequest, generateChapterWithAI, generateFromPagesWithAI, maxChunkBytes } from './ai.ts';
 
 export interface GenFormula { name: string; latex: string; meaning?: string }
 export interface GenQuestion {
@@ -230,7 +230,8 @@ const short = (m: string) => m.replace(/\s+/g, ' ').replace(/AIza[\w-]+|AQ\.[\w.
 export function aiFailureReason(e: unknown): string {
   const m = String((e as Error)?.message ?? e);
   const who = aiName();
-  if (e instanceof AiDailyLimitError) return "Gemini's free daily limit is used up";
+  if (e instanceof AiDailyLimitError) return `${who}'s free daily limit is used up`;
+  if (/\b402\b|insufficient credits|credits/i.test(m) && who === 'OpenRouter') return 'OpenRouter has no credits for this model (pick a model ending in :free, or add credits)';
   if (/credit balance/i.test(m)) return 'Claude API has no credits left';
   if (/invalid x-api-key|authentication|401|API key not valid|API_KEY_INVALID|PERMISSION_DENIED|403/i.test(m)) return `the ${who} API key is not valid`;
   if (/NO_FREE_QUOTA/.test(m)) return `your Gemini key has no free quota for this model`;
@@ -258,7 +259,7 @@ async function pagesAsPdf(bytes: Uint8Array | undefined, from: number, to: numbe
 
 const MAX_PAGES_PER_REQUEST = 12;
 // Gemini 3 models think before answering and the thinking uses the same token budget, so give them fewer pages at once.
-const pagesPerRequest = () => (aiProvider() === 'gemini' ? 6 : MAX_PAGES_PER_REQUEST);
+const pagesPerRequest = () => pagesPerAiRequest(MAX_PAGES_PER_REQUEST);
 
 export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgress: (f: number) => void, onNote?: (note: string) => void, bytes?: Uint8Array): Promise<GenTopic[]> {
   const sections = splitSections(pdf, sourceTitle).slice(0, 80);

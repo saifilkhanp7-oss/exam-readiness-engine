@@ -36,6 +36,26 @@ function getWorker() {
   return workerPromise;
 }
 
+/** Render every page of a (small) PDF to JPEG, longest side about maxSide px. Used to show pages to vision models. */
+export async function renderPagesJpeg(data: Uint8Array, maxSide = 1400): Promise<string[]> {
+  const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never }).promise;
+  const out: string[] = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: Math.min(3, maxSide / Math.max(base.width, base.height)) });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx as never, viewport }).promise;
+    out.push(Buffer.from(await canvas.encode('jpeg', 80)).toString('base64'));
+    page.cleanup();
+  }
+  await doc.destroy();
+  return out;
+}
+
 /** OCR the given 1-based pages of a PDF. Returns text per page number, and Tesseract's average confidence (0-100). */
 export async function ocrPages(data: Uint8Array, pages: number[], onProgress?: (f: number) => void): Promise<{ texts: Map<number, string>; confidence: number }> {
   const out = new Map<number, string>();
