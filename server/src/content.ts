@@ -1,7 +1,7 @@
 // Turns extracted book text into topics, notes (3 levels), formulas and quiz questions.
 // Uses Claude when ANTHROPIC_API_KEY is set; otherwise a heuristic fallback so the app runs without a key.
 import type { PdfText } from './pdf.ts';
-import { AiDailyLimitError, aiEnabled, aiName, generateChapterWithAI, generateFromPagesWithAI, maxChunkBytes } from './ai.ts';
+import { AiDailyLimitError, aiEnabled, aiName, aiProvider, generateChapterWithAI, generateFromPagesWithAI, maxChunkBytes } from './ai.ts';
 
 export interface GenFormula { name: string; latex: string; meaning?: string }
 export interface GenQuestion {
@@ -226,6 +226,7 @@ function heuristicQuestions(topics: ReturnType<typeof heuristicTopic>[]): GenQue
 
 /** Full pipeline for one source. */
 /** Short, plain reason for an AI failure (credits, key, rate limit), for showing to the student. */
+const short = (m: string) => m.replace(/\s+/g, ' ').replace(/AIza[\w-]+|AQ\.[\w.-]+/g, '…').slice(0, 140);
 export function aiFailureReason(e: unknown): string {
   const m = String((e as Error)?.message ?? e);
   const who = aiName();
@@ -235,8 +236,11 @@ export function aiFailureReason(e: unknown): string {
   if (/NO_FREE_QUOTA/.test(m)) return `your Gemini key has no free quota for this model`;
   if (/rate.?limit|429|overloaded|529|503|RESOURCE_EXHAUSTED/i.test(m)) return `${who} refused because of its per-minute limit`;
   if (/404|NOT_FOUND/i.test(m)) return `the ${who} model name was not found`;
-  if (/\b400\b|INVALID_ARGUMENT/i.test(m)) return `${who} rejected that part of the file`;
-  return `${who} could not be reached`;
+  if (/\b400\b|INVALID_ARGUMENT/i.test(m)) return `${who} rejected that part of the file (${short(m)})`;
+  if (/cut off/i.test(m)) return `${who}'s answer was too long and got cut off`;
+  if (/invalid content/i.test(m)) return `${who}'s answer was not in the expected format`;
+  if (/network error|fetch failed|ECONN|ETIMEDOUT|abort/i.test(m)) return `${who} could not be reached (network problem)`;
+  return `${who} had a problem (${short(m)})`;
 }
 
 /** Copy pages [from..to] (1-based) of the PDF into a small PDF, so Claude can read the real page layout and maths. */
@@ -253,6 +257,8 @@ async function pagesAsPdf(bytes: Uint8Array | undefined, from: number, to: numbe
 }
 
 const MAX_PAGES_PER_REQUEST = 12;
+// Gemini 3 models think before answering and the thinking uses the same token budget, so give them fewer pages at once.
+const pagesPerRequest = () => (aiProvider() === 'gemini' ? 6 : MAX_PAGES_PER_REQUEST);
 
 export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgress: (f: number) => void, onNote?: (note: string) => void, bytes?: Uint8Array): Promise<GenTopic[]> {
   const sections = splitSections(pdf, sourceTitle).slice(0, 80);
@@ -260,19 +266,44 @@ export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgre
     const out: GenTopic[] = [];
     // Group sections by chapter, then into chunks of at most MAX_PAGES_PER_REQUEST pages.
     const chunks: { chapter: string; secs: Section[] }[] = [];
-    for (const s of sections) {
+    // A section longer than one request's pages is split into parts, so every page is read.
+    const per = pagesPerRequest();
+    const parts = sections.flatMap(s => {
+      const len = s.pageTo - s.pageFrom + 1;
+      if (len <= per) return [s];
+      const n = Math.ceil(len / per);
+      return Array.from({ length: n }, (_, k) => ({ ...s, title: k ? `${s.title} (part ${k + 1})` : s.title,
+        pageFrom: s.pageFrom + k * per, pageTo: Math.min(s.pageTo, s.pageFrom + (k + 1) * per - 1) }));
+    });
+    for (const s of parts) {
       const last = chunks[chunks.length - 1];
       const pages = (c: Section[]) => c[c.length - 1].pageTo - c[0].pageFrom + 1;
-      if (last && last.chapter === s.chapter && pages([...last.secs, s]) <= MAX_PAGES_PER_REQUEST) last.secs.push(s);
+      if (last && last.chapter === s.chapter && pages([...last.secs, s]) <= pagesPerRequest()) last.secs.push(s);
       else chunks.push({ chapter: s.chapter, secs: [s] });
     }
     const allTitles = sections.map(s => s.title);
+    // If the answer for a chunk is too long and gets cut off, split the chunk in half and try each half.
+    const makeChunk = async (chapter: string, secs: Section[], from: number, to: number): Promise<GenTopic[]> => {
+      try {
+        return await generateChapterWithAI(chapter, secs, allTitles, await pagesAsPdf(bytes, from, to));
+      } catch (e) {
+        if (!/cut off/i.test(String((e as Error).message))) throw e;
+        if (secs.length > 1) {
+          const h = Math.ceil(secs.length / 2), a = secs.slice(0, h), b = secs.slice(h);
+          return [...await makeChunk(chapter, a, a[0].pageFrom, a[a.length - 1].pageTo), ...await makeChunk(chapter, b, b[0].pageFrom, b[b.length - 1].pageTo)];
+        }
+        if (to > from) { // one long section: read its first half only, rather than nothing
+          return makeChunk(chapter, secs, from, from + Math.floor((to - from) / 2));
+        }
+        throw e;
+      }
+    };
     let done = 0;
     try {
       for (const c of chunks) {
         const from = c.secs[0].pageFrom;
-        const to = Math.min(c.secs[c.secs.length - 1].pageTo, from + MAX_PAGES_PER_REQUEST * 2 - 1);
-        out.push(...await generateChapterWithAI(c.chapter, c.secs, allTitles, await pagesAsPdf(bytes, from, to)));
+        const to = Math.min(c.secs[c.secs.length - 1].pageTo, from + pagesPerRequest() * 2 - 1);
+        out.push(...await makeChunk(c.chapter, c.secs, from, to));
         onProgress(++done / chunks.length);
       }
       return out;
@@ -307,7 +338,7 @@ export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgre
 
 // ---------- handwritten / scanned notes ----------
 
-const HANDWRITTEN_PAGES_PER_REQUEST = 8;
+const HANDWRITTEN_PAGES_PER_REQUEST = 6;
 
 /** Handwritten, photographed or scanned notes: the AI reads the page images directly (no OCR), a few pages at a time. */
 export async function generateTopicsFromPages(bytes: Uint8Array, pageCount: number, sourceTitle: string, onProgress: (f: number) => void): Promise<GenTopic[]> {

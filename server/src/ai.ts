@@ -49,6 +49,7 @@ interface GeminiAsk { system: string; text: string; pdf?: Uint8Array | null; sch
 
 /** Interactions API (Google's current API; works with the new "AQ." auth keys). Falls back to generateContent if needed. */
 let useLegacy = false;
+let thinkingCfg = true; // dropped automatically if the model rejects thinking_level
 // Free tier allows only a few requests per minute: keep a gap between requests (GEMINI_MIN_GAP_SECONDS, default 15).
 let nextSlot = 0;
 async function waitTurn() {
@@ -73,16 +74,35 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
       model: GEMINI_MODEL,
       system_instruction: a.system,
       input: [...(a.pdf ? [{ type: 'document', data: Buffer.from(a.pdf).toString('base64'), mime_type: 'application/pdf' }] : []), { type: 'text', text: a.text }],
-      generation_config: { max_output_tokens: a.maxTokens },
+      generation_config: { max_output_tokens: a.maxTokens, ...(thinkingCfg ? { thinking_level: 'low' } : {}) },
       ...(a.schema ? { response_format: { type: 'text', mime_type: 'application/json', schema: a.schema } } : {}),
     };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY!.trim() },
-      body: JSON.stringify(body),
-    });
+    const headers = { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY!.trim() };
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10 * 60_000) });
+    } catch (e) {
+      console.warn('[AI] Gemini network error:', (e as Error).message);
+      if (attempt < retries) continue;
+      throw new Error(`Gemini network error: ${(e as Error).message}`);
+    }
     if (res.ok) {
-      const data: any = await res.json();
+      let data: any = await res.json();
+      // Free tier may queue the request ("waiting for capacity"): check back until it finishes (up to 15 min).
+      if (!legacy && (data.status === 'queued' || data.status === 'in_progress') && data.id) {
+        console.log(`[AI] Gemini request ${data.status}, waiting for it to finish`);
+        const until = Date.now() + 15 * 60_000;
+        while ((data.status === 'queued' || data.status === 'in_progress') && Date.now() < until) {
+          await sleep(5000);
+          const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions/${encodeURIComponent(data.id)}`, { headers });
+          if (r.ok) data = await r.json();
+        }
+      }
+      if (!legacy) {
+        if (data.status === 'incomplete') throw new Error('Gemini answer was cut off (too long)');
+        if (data.status === 'failed') throw new Error(`Gemini failed: ${JSON.stringify(data.errors ?? '').slice(0, 300)}`);
+        if (data.status === 'queued' || data.status === 'in_progress') throw new Error('Gemini kept the request waiting for more than 15 minutes');
+      }
       let text = '';
       if (legacy) {
         const cand = data.candidates?.[0];
@@ -100,6 +120,7 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
     const err: any = await res.json().catch(() => ({}));
     const msg = `${res.status} ${err.error?.status ?? ''} ${err.error?.message ?? ''}`;
     const details = JSON.stringify(err.error?.details ?? []);
+    if (!legacy && thinkingCfg && res.status === 400 && /thinking/i.test(msg)) { thinkingCfg = false; attempt--; continue; }
     // The newer API missing or rejecting the request shape (not a key problem): try the older one once.
     if (!legacy && (res.status === 404 || (res.status === 400 && /unknown name|invalid json|cannot find field/i.test(msg)))) {
       console.warn('[AI] Gemini Interactions API not usable, switching to generateContent:', msg);
@@ -122,7 +143,7 @@ async function gemini(a: GeminiAsk, retries: number): Promise<string> {
 /** Ask for structured output matching SAVE_TOOL's schema. Returns the parsed object. */
 async function askTopics(system: string, pdf: Uint8Array | null | undefined, text: string): Promise<unknown> {
   if (aiProvider() === 'gemini') {
-    const out = await gemini({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 32768 }, 6);
+    const out = await gemini({ system, text, pdf, schema: SAVE_TOOL.input_schema, maxTokens: 65536 }, 6);
     try { return JSON.parse(out.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { return {}; } // invalid JSON → schema check fails → one retry
   }
   const content = pdf ? [pdfDoc(pdf), { type: 'text' as const, text }] : [{ type: 'text' as const, text }];
