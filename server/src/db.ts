@@ -172,6 +172,7 @@ function CREATE_EXTRA() {
   if (!cols('sources').includes('ocr_pages')) db.exec('ALTER TABLE sources ADD COLUMN ocr_pages INTEGER NOT NULL DEFAULT 0');
   if (!cols('sources').includes('year')) db.exec('ALTER TABLE sources ADD COLUMN year INTEGER');
   if (!cols('sources').includes('note')) db.exec('ALTER TABLE sources ADD COLUMN note TEXT');
+  if (!cols('sources').includes('retry_after')) db.exec('ALTER TABLE sources ADD COLUMN retry_after INTEGER');
 }
 
 export default db;

@@ -1,7 +1,7 @@
 // Turns extracted book text into topics, notes (3 levels), formulas and quiz questions.
 // Uses Claude when ANTHROPIC_API_KEY is set; otherwise a heuristic fallback so the app runs without a key.
 import type { PdfText } from './pdf.ts';
-import { aiEnabled, generateChapterWithAI } from './ai.ts';
+import { AiDailyLimitError, aiEnabled, aiName, generateChapterWithAI, generateFromPagesWithAI, maxChunkBytes } from './ai.ts';
 
 export interface GenFormula { name: string; latex: string; meaning?: string }
 export interface GenQuestion {
@@ -228,10 +228,13 @@ function heuristicQuestions(topics: ReturnType<typeof heuristicTopic>[]): GenQue
 /** Short, plain reason for an AI failure (credits, key, rate limit), for showing to the student. */
 export function aiFailureReason(e: unknown): string {
   const m = String((e as Error)?.message ?? e);
+  const who = aiName();
+  if (e instanceof AiDailyLimitError) return "Gemini's free daily limit is used up";
   if (/credit balance/i.test(m)) return 'Claude API has no credits left';
-  if (/invalid x-api-key|authentication|401/i.test(m)) return 'the Claude API key is not valid';
-  if (/rate.?limit|429|overloaded|529/i.test(m)) return 'Claude is busy right now';
-  return 'Claude could not be reached';
+  if (/invalid x-api-key|authentication|401|API key not valid|API_KEY_INVALID|PERMISSION_DENIED|403/i.test(m)) return `the ${who} API key is not valid`;
+  if (/rate.?limit|429|overloaded|529|503|RESOURCE_EXHAUSTED/i.test(m)) return `${who} is busy right now`;
+  if (/404|NOT_FOUND/i.test(m)) return `the ${who} model name was not found`;
+  return `${who} could not be reached`;
 }
 
 /** Copy pages [from..to] (1-based) of the PDF into a small PDF, so Claude can read the real page layout and maths. */
@@ -272,17 +275,58 @@ export async function generateTopics(pdf: PdfText, sourceTitle: string, onProgre
       }
       return out;
     } catch (e) {
+      if (e instanceof AiDailyLimitError) throw e; // the job waits for the daily reset instead
       // Never fail the upload because of the AI: fall back to the offline method.
       console.warn('[AI] falling back to offline notes:', (e as Error).message);
-      onNote?.(`Made with the offline method because ${aiFailureReason(e)}. Upload again later for AI-written notes.`);
+      const why = aiFailureReason(e);
+      onNote?.(`Made with the offline method because ${why}. ${/not valid|not found/.test(why) ? 'Check the key or model name in your Railway variables, then upload again' : 'Upload again later'} for AI-written notes.`);
     }
   }
   const mathy = (pdf.pages.join('').match(MATHY) ?? []).length;
   MATHY.lastIndex = 0;
   const density = mathy / Math.max(1, pdf.pages.join('').length / 1000);
-  if ((mathy > 12 || density > 3) && !aiEnabled()) onNote?.('This PDF has a lot of maths. The offline method can only copy formulas that come out as clean text, so some may be missing. Add a Claude API key for exact LaTeX formulas and notes.');
+  if ((mathy > 12 || density > 3) && !aiEnabled()) onNote?.('This PDF has a lot of maths. The offline method can only copy formulas that come out as clean text, so some may be missing. Add a free Gemini API key (or a Claude API key) for exact LaTeX formulas and notes.');
   const base = sections.map(heuristicTopic);
   const qs = heuristicQuestions(base);
   onProgress(1);
   return base.map(({ defs, ...t }, i) => ({ ...t, questions: qs[i] }));
+}
+
+// ---------- handwritten / scanned notes ----------
+
+const HANDWRITTEN_PAGES_PER_REQUEST = 8;
+
+/** Handwritten, photographed or scanned notes: the AI reads the page images directly (no OCR), a few pages at a time. */
+export async function generateTopicsFromPages(bytes: Uint8Array, pageCount: number, sourceTitle: string, onProgress: (f: number) => void): Promise<GenTopic[]> {
+  // Build page ranges, shrinking a range when its pages are too big a file (phone photos can be several MB each).
+  const ranges: [number, number, Uint8Array][] = [];
+  let from = 1;
+  while (from <= pageCount) {
+    let to = Math.min(pageCount, from + HANDWRITTEN_PAGES_PER_REQUEST - 1);
+    let pdf = await pagesAsPdf(bytes, from, to);
+    while (pdf && pdf.length > maxChunkBytes() && to > from) { to = from + Math.floor((to - from) / 2); pdf = await pagesAsPdf(bytes, from, to); }
+    if (!pdf) throw new Error('This PDF could not be split into pages');
+    if (pdf.length > maxChunkBytes()) throw new Error(`Page ${from} is too large an image to send. Try scanning at a lower quality.`);
+    ranges.push([from, to, pdf]);
+    from = to + 1;
+  }
+  const out: GenTopic[] = [];
+  for (let i = 0; i < ranges.length; i++) {
+    const [a, b, pdf] = ranges[i];
+    const topics = await generateFromPagesWithAI(sourceTitle, pdf, a, b, out.map(t => t.title));
+    for (const t of topics) {
+      const prev = out.find(o => o.title.toLowerCase() === t.title.toLowerCase());
+      if (prev) {
+        // The same topic carried on from the previous pages: join the two parts.
+        prev.pageTo = Math.max(prev.pageTo, t.pageTo);
+        prev.compact = `${prev.compact}\n${t.compact}`;
+        prev.detailed = `${prev.detailed}\n\n${t.detailed}`;
+        prev.formulas.push(...t.formulas);
+        prev.questions.push(...t.questions);
+        prev.estLearnMin += t.estLearnMin;
+      } else out.push(t);
+    }
+    onProgress((i + 1) / ranges.length);
+  }
+  return out;
 }

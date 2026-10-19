@@ -36,10 +36,11 @@ function getWorker() {
   return workerPromise;
 }
 
-/** OCR the given 1-based pages of a PDF. Returns text per page number. */
-export async function ocrPages(data: Uint8Array, pages: number[], onProgress?: (f: number) => void): Promise<Map<number, string>> {
+/** OCR the given 1-based pages of a PDF. Returns text per page number, and Tesseract's average confidence (0-100). */
+export async function ocrPages(data: Uint8Array, pages: number[], onProgress?: (f: number) => void): Promise<{ texts: Map<number, string>; confidence: number }> {
   const out = new Map<number, string>();
-  if (!pages.length) return out;
+  if (!pages.length) return { texts: out, confidence: 100 };
+  let confSum = 0;
   const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never }).promise;
   const worker = await getWorker();
   let done = 0;
@@ -57,11 +58,12 @@ export async function ocrPages(data: Uint8Array, pages: number[], onProgress?: (
     const png = await canvas.encode('png');
     const { data: res } = await worker.recognize(png);
     out.set(n, cleanOcr(res.text));
+    confSum += res.confidence ?? 0;
     page.cleanup();
     onProgress?.(++done / pages.length);
   }
   await doc.destroy();
-  return out;
+  return { texts: out, confidence: confSum / pages.length };
 }
 
 /** Fix the usual OCR noise: hyphenated line breaks, stray spaces, common character swaps in headings. */

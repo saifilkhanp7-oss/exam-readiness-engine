@@ -7,7 +7,7 @@ import './db.ts';
 import { authRouter } from './auth.ts';
 import { api } from './api.ts';
 import { emailMode } from './mailer.ts';
-import { aiEnabled } from './ai.ts';
+import { aiEnabled, aiName } from './ai.ts';
 import { startWorker } from './jobs.ts';
 
 const app = express();
@@ -15,7 +15,7 @@ app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-app.get('/api/health', (_req, res) => { res.json({ ok: true, app: APP_NAME, email: emailMode(), ai: aiEnabled() }); });
+app.get('/api/health', (_req, res) => { res.json({ ok: true, app: APP_NAME, email: emailMode(), ai: aiEnabled() ? aiName() : false }); });
 app.use('/api/auth', authRouter);
 app.use('/api', api);
 
@@ -31,7 +31,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 startWorker();
 app.listen(PORT, () => {
-  console.log(`${APP_NAME} API on http://localhost:${PORT} · email: ${emailMode()} · AI: ${aiEnabled() ? 'Claude' : 'offline fallback'}`);
+  console.log(`${APP_NAME} API on http://localhost:${PORT} · email: ${emailMode()} · AI: ${aiEnabled() ? aiName() : 'offline fallback'}`);
   if (emailMode() === 'none') console.log(process.env.OTP_DEMO_MODE === 'true'
     ? 'OTP demo mode: codes are shown on screen.'
     : 'No email settings: login codes are printed here (and shown on screen when not in production).');

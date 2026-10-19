@@ -10,7 +10,7 @@ interface Topic {
   question_count: number; recall_on_exam: number | null; danger: boolean; calibration: { expectedPct: number; accuracyPct: number; n: number } | null;
   paper_count: number; paper_marks: number;
 }
-interface Source { id: number; title: string; kind: string; pages: number | null; status: string; progress: number; error: string | null; note: string | null; ocr_pages: number; year: number | null }
+interface Source { id: number; title: string; kind: string; pages: number | null; status: string; progress: number; error: string | null; note: string | null; ocr_pages: number; year: number | null; retry_after?: number | null }
 interface Paper { id: number; title: string; year: number | null; status: string; error: string | null; questions: number; matched: number }
 interface Unmatched { id: number; number: string; text: string; marks: number; year: number | null }
 interface Triage { active: boolean; requiredMinutes: number; availableMinutes: number; skippedMarks: number; items: { topicId: number; title: string; kind: string; hours: number; marksGain: number; marksPerHour: number; decision: string }[] }
@@ -223,19 +223,21 @@ function SourceList({ sources, papers, onDelete }: { sources: Source[]; papers?:
     <div className="mt-3 grid gap-2.5">
       {sources.map(src => {
         const paper = papers?.find(p => p.id === src.id);
+        const waiting = src.status === 'queued' && src.retry_after != null && src.retry_after > Date.now();
         return (
           <div key={src.id} className="text-sm group">
             <div className="flex justify-between gap-2 min-w-0">
               <span className="truncate font-bold min-w-0" title={src.title}>{src.title}</span>
               <span className="flex items-center gap-2 shrink-0">
                 <span className={src.status === 'failed' ? 'text-storm' : 'text-ink-soft'}>
-                  {src.status === 'done' ? (paper ? `${paper.year ?? 'year?'}, ${paper.matched}/${paper.questions} matched` : `${src.pages} page${src.pages === 1 ? '' : 's'}`) : src.status === 'failed' ? 'Failed' : `${Math.round(src.progress * 100)}%`}
+                  {src.status === 'done' ? (paper ? `${paper.year ?? 'year?'}, ${paper.matched}/${paper.questions} matched` : `${src.pages} page${src.pages === 1 ? '' : 's'}`) : src.status === 'failed' ? 'Failed' : waiting ? 'Waiting' : `${Math.round(src.progress * 100)}%`}
                 </span>
                 <button onClick={() => { if (confirm(`Remove ${src.title}?`)) onDelete(src.id); }} aria-label={`Remove ${src.title}`} className="text-ink-soft hover:text-storm"><X size={14} /></button>
               </span>
             </div>
-            {src.ocr_pages > 0 && src.status === 'done' && <p className="text-xs text-ink-soft mt-0.5 flex items-center gap-1"><ScanText size={12} /> Read {src.ocr_pages} scanned page{src.ocr_pages === 1 ? '' : 's'} with OCR</p>}
-            {(src.status === 'processing' || src.status === 'queued') && <div className="h-1 bg-mist rounded-full mt-1"><div className="h-full bg-act rounded-full transition-all" style={{ width: `${src.progress * 100}%` }} /></div>}
+            {src.ocr_pages > 0 && src.status === 'done' && <p className="text-xs text-ink-soft mt-0.5 flex items-center gap-1"><ScanText size={12} /> Read {src.ocr_pages} scanned or handwritten page{src.ocr_pages === 1 ? '' : 's'}</p>}
+            {waiting && <p className="text-haze text-xs mt-0.5">Gemini's free daily limit is used up. This file carries on by itself at {new Date(src.retry_after!).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.</p>}
+            {(src.status === 'processing' || src.status === 'queued') && !waiting && <div className="h-1 bg-mist rounded-full mt-1"><div className="h-full bg-act rounded-full transition-all" style={{ width: `${src.progress * 100}%` }} /></div>}
             {src.note && src.status === 'done' && <p className="text-haze text-xs mt-0.5">{src.note}</p>}
             {src.error && <p className="text-storm text-xs mt-0.5">{src.error}</p>}
           </div>

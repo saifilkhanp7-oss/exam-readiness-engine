@@ -120,7 +120,7 @@ api.get('/subjects/:id', (req, res) => {
   const fc = plan?.forecasts.find(f => f.subjectId === s.id);
   const recallMap = new Map(fc?.topics.map(t => [t.id, t.recallOnExam]) ?? []);
   const { byTopic } = userCalibration(req.user.id);
-  const sources = db.prepare("SELECT id, title, kind, pages, status, progress, error, note, ocr_pages, year, created_at FROM sources WHERE subject_id=? ORDER BY id DESC").all(s.id);
+  const sources = db.prepare("SELECT id, title, kind, pages, status, progress, error, note, ocr_pages, year, retry_after, created_at FROM sources WHERE subject_id=? ORDER BY id DESC").all(s.id);
   const papers = paperStats(s.id);
   res.json({
     subject: s,
