@@ -1,12 +1,25 @@
 // OCR for scanned PDFs: renders image-only pages with pdf.js + @napi-rs/canvas and reads them with Tesseract.
 // English language data is bundled (@tesseract.js-data/eng), so no download is needed at run time.
-import { createCanvas, type Canvas } from '@napi-rs/canvas';
+import { createCanvas, Path2D as NapiPath2D, DOMMatrix as NapiDOMMatrix, type Canvas } from '@napi-rs/canvas';
 import { createWorker, type Worker } from 'tesseract.js';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
+
+// pdf.js loads its own handle to the canvas library, and its Path2D is not accepted by the canvases we create,
+// which breaks drawing of text glyphs ("Value is none of these types String, Path"). Use our classes everywhere.
+(globalThis as any).Path2D = NapiPath2D;
+(globalThis as any).DOMMatrix ??= NapiDOMMatrix;
+/** Built-in PDF fonts (Helvetica, Times, Symbol…) and character maps, so pages without embedded fonts draw correctly. */
+const pdfjsDir = path.dirname(require.resolve('pdfjs-dist/package.json'));
+export const PDFJS_ASSETS = {
+  standardFontDataUrl: path.join(pdfjsDir, 'standard_fonts') + path.sep,
+  cMapUrl: path.join(pdfjsDir, 'cmaps') + path.sep,
+  cMapPacked: true,
+};
 const engData = require('@tesseract.js-data/eng') as { langPath: string; gzip: boolean };
 
 /** pdf.js needs a canvas factory in Node; this one uses @napi-rs/canvas (prebuilt, no system libraries). */
@@ -38,7 +51,7 @@ function getWorker() {
 
 /** Render every page of a (small) PDF to JPEG, longest side about maxSide px. Used to show pages to vision models. */
 export async function renderPagesJpeg(data: Uint8Array, maxSide = 1400): Promise<string[]> {
-  const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never }).promise;
+  const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never, ...PDFJS_ASSETS }).promise;
   const out: string[] = [];
   for (let n = 1; n <= doc.numPages; n++) {
     const page = await doc.getPage(n);
@@ -61,7 +74,7 @@ export async function ocrPages(data: Uint8Array, pages: number[], onProgress?: (
   const out = new Map<number, string>();
   if (!pages.length) return { texts: out, confidence: 100 };
   let confSum = 0;
-  const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never }).promise;
+  const doc = await pdfjs.getDocument({ data: data.slice(), isEvalSupported: false, CanvasFactory: NapiCanvasFactory as never, ...PDFJS_ASSETS }).promise;
   const worker = await getWorker();
   let done = 0;
   for (const n of pages) {

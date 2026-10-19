@@ -160,7 +160,11 @@ let orNext = 0;
 const stripFences = (t: string) => t.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
 
 async function openrouter(a: GeminiAsk, retries: number): Promise<string> {
-  const images = a.pdf ? await renderPagesJpeg(a.pdf) : [];
+  let images: string[] = [];
+  if (a.pdf) {
+    try { images = await renderPagesJpeg(a.pdf); }
+    catch (e) { console.warn('[AI] could not draw the pages as images, sending text only:', (e as Error).message); }
+  }
   for (let attempt = 0; ; attempt++) {
     const gap = Number(process.env.OPENROUTER_MIN_GAP_SECONDS ?? 4) * 1000;
     const wait = Math.max(0, orNext - Date.now());
